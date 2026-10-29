@@ -1,0 +1,101 @@
+module sh.sysl.blas
+@no_alloc
+
+import sysl.math.Float
+
+/** The element types the routines are written over: the two IEEE binary widths.
+ *
+ * Beyond `Float`, a routine needs a few constants that depend on the format's exponent range and
+ * precision. They are the ones LAPACK's `la_constants` defines, and each is a power of two, so it is
+ * exact. `nrm2` uses the four Blue's-algorithm thresholds; `rotg` uses the safe range.
+ */
+trait Real: Float
+    /** Values smaller than this are scaled up before squaring, or their squares would underflow. */
+    blue_small() -> Self
+    /** Values larger than this are scaled down before squaring, or their squares would overflow. */
+    blue_big() -> Self
+    /** The factor a small value is scaled up by. */
+    blue_scale_small() -> Self
+    /** The factor a big value is scaled down by. */
+    blue_scale_big() -> Self
+    /** The smallest positive normal value, whose reciprocal does not overflow. */
+    safe_min() -> Self
+    /** The reciprocal of `safe_min`. */
+    safe_max() -> Self
+
+impl Real for f64
+    blue_small() -> f64 = 0x1p-511
+    blue_big() -> f64 = 0x1p486
+    blue_scale_small() -> f64 = 0x1p537
+    blue_scale_big() -> f64 = 0x1p-538
+    safe_min() -> f64 = 0x1p-1022
+    safe_max() -> f64 = 0x1p1022
+
+impl Real for f32
+    blue_small() -> f32 = 0x1p-63
+    blue_big() -> f32 = 0x1p52
+    blue_scale_small() -> f32 = 0x1p75
+    blue_scale_big() -> f32 = 0x1p-76
+    safe_min() -> f32 = 0x1p-126
+    safe_max() -> f32 = 0x1p126
+
+/** A read-only BLAS vector: `len` elements of `data`, `inc` apart.
+ *
+ * The stride follows BLAS: a negative `inc` walks the storage backwards, so element 0 is the LAST
+ * one in `data` that the view covers, at `(len - 1) * -inc`, and element `len - 1` is `data[0]`. An
+ * `inc` of zero repeats `data[0]`.
+ */
+struct Strided[T]
+    data: []const T
+    len: usize
+    inc: int
+
+/** A BLAS vector that the routine writes, with the same stride rules as `Strided`. */
+struct StridedMut[T]
+    data: []T
+    len: usize
+    inc: int
+
+/** Where the view's first element is in `data`, and how far apart its elements are. */
+private start(len: usize, inc: int) -> int = if inc >= 0 then 0 else (int(len) - 1) * -inc
+
+private covers(have: usize, len: usize, inc: int) -> bool = len == 0 || (int(len) - 1) * inc.abs() < int(have)
+
+/** Every element of `data`, contiguous. */
+view[T](data: []const T) -> Strided[T] = Strided(data, data.len, 1)
+
+/** Every element of `data`, contiguous and writable. */
+view_mut[T](data: []T) -> StridedMut[T] = StridedMut(data, data.len, 1)
+
+/** `len` elements of `data`, `inc` apart; traps if `data` is too short to hold them. */
+strided[T](data: []const T, len: usize, inc: int) -> Strided[T]
+    assert(covers(data.len, len, inc), "a strided view reaches past the end of its data")
+    Strided(data, len, inc)
+
+/** `len` writable elements of `data`, `inc` apart; traps if `data` is too short to hold them. */
+strided_mut[T](data: []T, len: usize, inc: int) -> StridedMut[T]
+    assert(covers(data.len, len, inc), "a strided view reaches past the end of its data")
+    StridedMut(data, len, inc)
+
+impl[T] Strided[T]
+    /** Where element 0 sits in `data`. */
+    first(self) -> int = start(self.len, self.inc)
+
+    /** Element `i`, counted in BLAS order. */
+    at(self, i: usize) -> T = self.data[usize(self.first() + int(i) * self.inc)]
+
+    /** True when the elements are `data[0..<len]` in order, which the vector kernels need. */
+    is_contiguous(self) -> bool = self.inc == 1 || self.len <= 1
+
+impl[T] StridedMut[T]
+    first(self) -> int = start(self.len, self.inc)
+
+    at(self, i: usize) -> T = self.data[usize(self.first() + int(i) * self.inc)]
+
+    set(self, i: usize, v: T)
+        self.data[usize(self.first() + int(i) * self.inc)] = v
+
+    is_contiguous(self) -> bool = self.inc == 1 || self.len <= 1
+
+    /** The same elements, read-only. */
+    as_view(self) -> Strided[T] = Strided(self.data, self.len, self.inc)

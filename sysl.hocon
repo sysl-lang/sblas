@@ -1,0 +1,3 @@
+package { name = "blas", version = "0.0.1", sysl = "0.7.10" }
+optimization = "2"
+workspace = ["oracle", "bench"]

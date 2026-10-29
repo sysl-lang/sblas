@@ -1,0 +1,250 @@
+module sh.sysl.blas
+@no_alloc
+
+// Level 1: vector-vector routines, O(n) work on O(n) data.
+//
+// Every routine has two paths. When the views it reads are contiguous and pair their elements the
+// way their storage does (both strides 1, or both -1), the work is a slice kernel over vectors of
+// `lanes(T)` elements; otherwise it is a scalar walk that follows each stride. A routine given views
+// of different lengths traps: BLAS passes one `n`, and two views that disagree about it are a bug in
+// the caller.
+
+/** Lanes per kernel step: 64 bytes, four 128-bit registers, so f32 runs 16 wide and f64 8 wide. */
+private const block_bytes: usize = 64
+
+private same_len(a: usize, b: usize)
+    assert(a == b, "the two vectors have different lengths")
+
+/** True when element i of both views is element i of both slices, or the mirror of it. */
+private paired(len: usize, xinc: int, yinc: int) -> bool = len <= 1 || (xinc == yinc && (xinc == 1 || xinc == -1))
+
+/** The `len` elements a view covers, as one slice. Only meaningful when `inc` is 1 or -1. */
+private span[T](data: []const T, len: usize) -> []const T = data[0..<len]
+
+private span_mut[T](data: []T, len: usize) -> []T = data[0..<len]
+
+// --- Contiguous kernels ---------------------------------------------------------------------------
+
+private dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) -> T
+    var acc: <W>T = T.zero()
+    var i: usize = 0
+    while i + W <= x.len
+        val a: <W>T = x.load(i)
+        acc = acc + a * y.load(i)
+        i += W
+    var s = acc.sum()
+    while i < x.len
+        s = s + x[i] * y[i]
+        i += 1
+    s
+
+private axpy_kernel[T: Real, const W: usize](alpha: T, x: []const T, y: []T)
+    var i: usize = 0
+    while i + W <= x.len
+        val a: <W>T = x.load(i)
+        y.store(i, a * alpha + y.load(i))
+        i += W
+    while i < x.len
+        y[i] = x[i] * alpha + y[i]
+        i += 1
+
+private scal_kernel[T: Real, const W: usize](alpha: T, x: []T)
+    var i: usize = 0
+    while i + W <= x.len
+        val a: <W>T = x.load(i)
+        x.store(i, a * alpha)
+        i += W
+    while i < x.len
+        x[i] = x[i] * alpha
+        i += 1
+
+private rot_kernel[T: Real, const W: usize](x: []T, y: []T, c: T, s: T)
+    var i: usize = 0
+    while i + W <= x.len
+        val a: <W>T = x.load(i)
+        val b: <W>T = y.load(i)
+        x.store(i, a * c + b * s)
+        y.store(i, b * c - a * s)
+        i += W
+    while i < x.len
+        val a = x[i]
+        val b = y[i]
+        x[i] = a * c + b * s
+        y[i] = b * c - a * s
+        i += 1
+
+// --- The routines ---------------------------------------------------------------------------------
+
+/** `y := alpha * x + y`. Nothing is read or written when `alpha` is zero, as in the reference BLAS. */
+axpy[T: Real](alpha: T, x: Strided[T], y: StridedMut[T])
+    same_len(x.len, y.len)
+    if x.len == 0 || alpha == T.zero() then return
+    if paired(x.len, x.inc, y.inc)
+        axpy_kernel[T, block_bytes / sizeof(T)](alpha, span(x.data, x.len), span_mut(y.data, y.len))
+        return
+    var ix = x.first()
+    var iy = y.first()
+    for _ in 0..<x.len
+        y.data[usize(iy)] = x.data[usize(ix)] * alpha + y.data[usize(iy)]
+        ix += x.inc
+        iy += y.inc
+
+/** The sum of `x[i] * y[i]`. */
+dot[T: Real](x: Strided[T], y: Strided[T]) -> T
+    same_len(x.len, y.len)
+    if paired(x.len, x.inc, y.inc) then return dot_kernel[T, block_bytes / sizeof(T)](span(x.data, x.len), span(y.data, y.len))
+    var s = T.zero()
+    var ix = x.first()
+    var iy = y.first()
+    for _ in 0..<x.len
+        s = s + x.data[usize(ix)] * y.data[usize(iy)]
+        ix += x.inc
+        iy += y.inc
+    s
+
+/** The Euclidean norm, computed without overflow or underflow in its intermediate squares.
+ *
+ * Blue's algorithm, as the reference BLAS has it since LAPACK 3.10: each element's square is added
+ * to one of three accumulators — values below `blue_small` scaled up, values above `blue_big` scaled
+ * down, and the rest as they are — and the three are combined at the end. One pass, no division per
+ * element. A NaN anywhere gives NaN; an infinity, infinity.
+ */
+nrm2[T: Real](x: Strided[T]) -> T
+    val tsml = T.blue_small()
+    val tbig = T.blue_big()
+    val ssml = T.blue_scale_small()
+    val sbig = T.blue_scale_big()
+    var notbig = true
+    var asml = T.zero()
+    var amed = T.zero()
+    var abig = T.zero()
+    var ix = x.first()
+    for _ in 0..<x.len
+        val ax = x.data[usize(ix)].abs()
+        if ax > tbig
+            abig = abig + (ax * sbig).square()
+            notbig = false
+        else if ax < tsml
+            if notbig then asml = asml + (ax * ssml).square()
+        else
+            amed = amed + ax * ax
+        ix += x.inc
+    if abig > T.zero()
+        // A non-zero middle sum is folded into the big one at its scale; a NaN there must survive.
+        if amed > T.zero() || amed.is_nan() then abig = abig + (amed * sbig) * sbig
+        return abig.sqrt() / sbig
+    if asml > T.zero()
+        if amed > T.zero() || amed.is_nan()
+            val med = amed.sqrt()
+            val sml = asml.sqrt() / ssml
+            val lo = if sml > med then med else sml
+            val hi = if sml > med then sml else med
+            return hi * (T.one() + (lo / hi).square()).sqrt()
+        return asml.sqrt() / ssml
+    amed.sqrt()
+
+/** The sum of `|x[i]|`. */
+asum[T: Real](x: Strided[T]) -> T
+    var s = T.zero()
+    var ix = x.first()
+    for _ in 0..<x.len
+        s = s + x.data[usize(ix)].abs()
+        ix += x.inc
+    s
+
+/** `x := alpha * x`. Every element is multiplied, so a NaN or infinity in `x` survives an `alpha` of zero. */
+scal[T: Real](alpha: T, x: StridedMut[T])
+    if x.inc == 1 || x.inc == -1 || x.len <= 1
+        scal_kernel[T, block_bytes / sizeof(T)](alpha, span_mut(x.data, x.len))
+        return
+    var ix = x.first()
+    for _ in 0..<x.len
+        x.data[usize(ix)] = x.data[usize(ix)] * alpha
+        ix += x.inc
+
+/** `y := x`. */
+copy[T: Real](x: Strided[T], y: StridedMut[T])
+    same_len(x.len, y.len)
+    var ix = x.first()
+    var iy = y.first()
+    for _ in 0..<x.len
+        y.data[usize(iy)] = x.data[usize(ix)]
+        ix += x.inc
+        iy += y.inc
+
+/** Exchanges the elements of `x` and `y`. */
+swap[T: Real](x: StridedMut[T], y: StridedMut[T])
+    same_len(x.len, y.len)
+    var ix = x.first()
+    var iy = y.first()
+    for _ in 0..<x.len
+        val t = x.data[usize(ix)]
+        x.data[usize(ix)] = y.data[usize(iy)]
+        y.data[usize(iy)] = t
+        ix += x.inc
+        iy += y.inc
+
+/** The index, in BLAS order, of the first element of largest magnitude; `None` for an empty view.
+ *
+ * Ties go to the earliest index, and a NaN is never larger than anything, so it is chosen only when
+ * it is element 0 and nothing after it compares larger.
+ */
+iamax[T: Real](x: Strided[T]) -> Option[usize]
+    if x.len == 0 then return None
+    var best: usize = 0
+    var ix = x.first()
+    var top = x.data[usize(ix)].abs()
+    for i in 1..<x.len
+        ix += x.inc
+        val ax = x.data[usize(ix)].abs()
+        if ax > top
+            top = ax
+            best = i
+    Some(best)
+
+/** Applies the plane rotation `[c s; -s c]` to the pairs `(x[i], y[i])`. */
+rot[T: Real](x: StridedMut[T], y: StridedMut[T], c: T, s: T)
+    same_len(x.len, y.len)
+    if paired(x.len, x.inc, y.inc)
+        rot_kernel[T, block_bytes / sizeof(T)](span_mut(x.data, x.len), span_mut(y.data, y.len), c, s)
+        return
+    var ix = x.first()
+    var iy = y.first()
+    for _ in 0..<x.len
+        val a = x.data[usize(ix)]
+        val b = y.data[usize(iy)]
+        x.data[usize(ix)] = a * c + b * s
+        y.data[usize(iy)] = b * c - a * s
+        ix += x.inc
+        iy += y.inc
+
+/** A plane rotation as `rotg` constructs it.
+ *
+ * `[c s; -s c] * [a; b] = [r; 0]`. `z` is the single number the reference BLAS stores in place of
+ * `b` to let the rotation be rebuilt: `s` if `|a| > |b|`, otherwise `1 / c`, or 1 when `c` is zero.
+ */
+struct Givens[T] derives Eq
+    c: T
+    s: T
+    r: T
+    z: T
+
+/** The rotation that zeroes `b` against `a`, with the reference BLAS's sign conventions.
+ *
+ * `r` takes the sign of whichever of `a` and `b` is larger in magnitude (of `b` on a tie), so `c` is
+ * never negative when `|a| > |b|`. Computed with the scaling of LAPACK 3.10, which neither overflows
+ * nor underflows for any finite `a` and `b`.
+ */
+rotg[T: Real](a: T, b: T) -> Givens[T]
+    val anorm = a.abs()
+    val bnorm = b.abs()
+    if bnorm == T.zero() then return Givens(T.one(), T.zero(), a, T.zero())
+    if anorm == T.zero() then return Givens(T.zero(), T.one(), b, T.one())
+    val big = if anorm > bnorm then anorm else bnorm
+    val scl = (if big < T.safe_min() then T.safe_min() else big).min_num(T.safe_max())
+    val sigma = if anorm > bnorm then T.one().copysign(a) else T.one().copysign(b)
+    val r = sigma * scl * ((a / scl).square() + (b / scl).square()).sqrt()
+    val c = a / r
+    val s = b / r
+    val z = if anorm > bnorm then s else if c != T.zero() then T.one() / c else T.one()
+    Givens(c, s, r, z)

@@ -1,0 +1,173 @@
+module sh.sysl.cblas
+@tests
+
+import sh.sysl.blas.*
+import sysl.slices.as_mut_ptr
+
+// Every routine of sh.sysl.blas against the platform's CBLAS on generated data, at both widths, every
+// length class the kernels distinguish, and strides of each sign. The reference values come from the
+// oracle, never from this file.
+
+// --- Data ------------------------------------------------------------------------------------------
+
+private const cap: usize = 1024
+
+/** The lengths the kernels treat differently: empty, one, under one step, several steps plus a tail. */
+private val lengths: [7]usize = [0, 1, 2, 7, 33, 64, 257]
+
+/** Stride pairs: both contiguous, both reversed (still the kernel path), and the walks. */
+private val incs: [7](int, int) = [(1, 1), (-1, -1), (2, 3), (-2, 1), (1, -3), (-3, -2), (3, 1)]
+
+/** A deterministic stream of values in [-scale, scale), from a 64-bit xorshift. */
+struct Stream
+    state: u64
+
+impl Stream
+    next(*self) -> f64
+        self.state ^= self.state << 13
+        self.state ^= self.state >> 7
+        self.state ^= self.state << 17
+        f64(self.state >> 11) * 0x1p-52 - 1
+
+private fill[T: Oracle](xs: []T, s: *Stream, scale: f64)
+    for i in 0..<xs.len
+        xs[i] = T.from_unit(s.next() * scale)
+
+private extent(n: usize, inc: int) -> usize = if n == 0 then 1 else 1 + (n - 1) * usize(inc.abs())
+
+/** `got` is within `ulps` units of `want`'s magnitude, or of `bound` where cancellation makes that small. */
+private near[T: Oracle](got: T, want: T, bound: T, ulps: T) -> bool = (got - want).abs() <= ulps * T.epsilon() * (want.abs() + bound)
+
+// --- The checks ------------------------------------------------------------------------------------
+
+private check_reductions[T: Oracle](seed: u64)
+    var s = Stream(seed)
+    var xb: [cap]T
+    var yb: [cap]T
+    for n in lengths
+        for (incx, incy) in incs
+            val xs = xb[0..<extent(n, incx)]
+            val ys = yb[0..<extent(n, incy)]
+            fill(xs, &s, 1)
+            fill(ys, &s, 1)
+            val x = strided(xs, n, incx)
+            val y = strided(ys, n, incy)
+            val nn = i32(n)
+            var bound = T.zero()
+            for i in 0..<n
+                bound = bound + (x.at(i) * y.at(i)).abs()
+            val want = T.o_dot(nn, as_mut_ptr(xs), i32(incx), as_mut_ptr(ys), i32(incy))
+            assert(near(dot(x, y), want, bound, T.from_unit(f64(n + 1))), "dot")
+            // CBLAS refuses a negative stride for a one-vector routine, so the oracle walks the same
+            // elements forwards; for iamax that reverses the order, and the index is mirrored back.
+            val ax = i32(incx.abs())
+            assert(near(nrm2(x), T.o_nrm2(nn, as_mut_ptr(xs), ax), T.zero(), 4), "nrm2")
+            assert(near(asum(x), T.o_asum(nn, as_mut_ptr(xs), ax), T.zero(), T.from_unit(f64(n + 1))), "asum")
+            val got = iamax(x)
+            val forwards = usize(T.o_iamax(nn, as_mut_ptr(xs), ax))
+            val want_max = if incx < 0 then n - 1 - forwards else forwards
+            assert(if n == 0 then got == None else got == Some(want_max), "iamax")
+
+/** Runs a two-vector update through both implementations on equal copies of the whole storage, so a
+ * write between the strided elements shows up as well as a wrong one.
+ */
+private check_updates[T: Oracle](seed: u64)
+    var s = Stream(seed)
+    var xa: [cap]T
+    var ya: [cap]T
+    var xb: [cap]T
+    var yb: [cap]T
+    for n in lengths
+        for (incx, incy) in incs
+            val lx = extent(n, incx)
+            val ly = extent(n, incy)
+            val nn = i32(n)
+            val ix = i32(incx)
+            val iy = i32(incy)
+            val alpha = T.from_unit(s.next() * 4)
+            val c = T.from_unit(0.6)
+            val sn = T.from_unit(-0.8)
+            for op in 0..<5
+                fill(xa[0..<lx], &s, 1)
+                fill(ya[0..<ly], &s, 1)
+                for i in 0..<lx
+                    xb[i] = xa[i]
+                for i in 0..<ly
+                    yb[i] = ya[i]
+                val x = strided_mut(xa[0..<lx], n, incx)
+                val y = strided_mut(ya[0..<ly], n, incy)
+                val px = as_mut_ptr(xb[0..<lx])
+                val py = as_mut_ptr(yb[0..<ly])
+                op match
+                    0 ->
+                        axpy(alpha, x.as_view(), y)
+                        T.o_axpy(nn, alpha, px, ix, py, iy)
+                    1 ->
+                        scal(alpha, x)
+                        T.o_scal(nn, alpha, px, i32(incx.abs()))
+                    2 ->
+                        copy(x.as_view(), y)
+                        T.o_copy(nn, px, ix, py, iy)
+                    3 ->
+                        swap(x, y)
+                        T.o_swap(nn, px, ix, py, iy)
+                    else
+                        rot(x, y, c, sn)
+                        T.o_rot(nn, px, ix, py, iy, c, sn)
+                for i in 0..<lx
+                    assert(near(xa[i], xb[i], T.one(), 4), "x after an update")
+                for i in 0..<ly
+                    assert(near(ya[i], yb[i], alpha.abs() + T.one(), 4), "y after an update")
+
+private check_rotg[T: Oracle](a: T, b: T)
+    var ra = a
+    var rb = b
+    var c = T.zero()
+    var sn = T.zero()
+    T.o_rotg(&ra, &rb, &c, &sn)
+    val g = rotg(a, b)
+    assert(near(g.c, c, T.zero(), 2) && near(g.s, sn, T.zero(), 2), "rotg c and s")
+    assert(near(g.r, ra, T.zero(), 2) && near(g.z, rb, T.zero(), 2), "rotg r and z")
+
+private check_rotg_cases[T: Oracle]()
+    val vals: [9]f64 = [0, 1, -1, 3, -4, 0.5, -2, 1e-3, 7]
+    for a in vals
+        for b in vals
+            check_rotg(T.from_unit(a), T.from_unit(b))
+
+private check_iamax_ties[T: Oracle]()
+    var xs: [6]T
+    val vals: [6]f64 = [1, -3, 3, 2, -3, 3]
+    for i in 0..<6
+        xs[i] = T.from_unit(vals[i])
+    // Positive strides only: CBLAS refuses a negative one here, and mirroring would move the tie.
+    for inc in [1, 2, 3]
+        val n = (6 - 1) / usize(inc.abs()) + 1
+        val got = iamax(strided(xs[..], n, inc))
+        assert(got == Some(usize(T.o_iamax(i32(n), as_mut_ptr(xs[..]), i32(inc)))), "iamax tie")
+
+@test("dot, nrm2, asum and iamax agree with the platform BLAS, f64")
+oracle_reductions_f64()
+    check_reductions[f64](1)
+
+@test("dot, nrm2, asum and iamax agree with the platform BLAS, f32")
+oracle_reductions_f32()
+    check_reductions[f32](2)
+
+@test("axpy, scal, copy, swap and rot agree with the platform BLAS, f64")
+oracle_updates_f64()
+    check_updates[f64](3)
+
+@test("axpy, scal, copy, swap and rot agree with the platform BLAS, f32")
+oracle_updates_f32()
+    check_updates[f32](4)
+
+@test("rotg agrees with the platform BLAS on every sign and magnitude order")
+oracle_rotg()
+    check_rotg_cases[f64]()
+    check_rotg_cases[f32]()
+
+@test("iamax breaks ties as the platform BLAS does, at every stride")
+oracle_iamax_ties()
+    check_iamax_ties[f64]()
+    check_iamax_ties[f32]()

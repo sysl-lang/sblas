@@ -1,0 +1,5 @@
+// The platform's CBLAS, declared as the oracle sh.sysl.blas is tested and benchmarked against. A
+// project of its own so that the blas package itself links nothing.
+package { name = "cblas-oracle", version = "0.0.1", sysl = "0.7.10" }
+optimization = "2"
+dependencies { blas { workspace = true } }

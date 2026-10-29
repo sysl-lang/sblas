@@ -1,0 +1,57 @@
+import sh.sysl.blas.*
+import sh.sysl.cblas.Oracle
+import sysl.slices.as_mut_ptr
+import sysl.time.monotonic
+import sysl.hint.black_box
+import sysl.buf.{Buf, buf}
+
+// dot and axpy, sh.sysl.blas against the platform's CBLAS, at sizes that live in L1, in L2, and in
+// main memory. Each figure is the best of several trials, each trial long enough that the
+// microsecond clock is not what is measured. Both routines count 2n floating-point operations.
+
+private val sizes: [4]usize = [1024, 16384, 262144, 4194304]
+
+private const trials = 7
+
+/** About this many operations per trial, so a small size runs many repetitions. */
+private const work: f64 = 4e8
+
+private fill[T: Oracle](n: usize) -> Buf[T]
+    var b: Buf[T] = buf()
+    for i in 0..<n
+        b.push(T.from_unit(f64(i % 17) * 0.0625 - 0.5))
+    b
+
+private seconds(us: long) -> f64 = f64(us) * 1e-6
+
+/** Best GFLOPS over the trials of `reps` calls of `body`, each worth `2n` operations. */
+private best[R](n: usize, reps: int, body: &Fn() -> R) -> f64
+    var top = 0.0
+    for _ in 0..<trials
+        val t0 = monotonic().us
+        for _ in 0..<reps
+            black_box(body())
+        val dt = seconds(monotonic().us - t0)
+        val g = 2.0 * f64(n) * f64(reps) / dt * 1e-9
+        if g > top then top = g
+    top
+
+private bench_width[T: Oracle](name: string)
+    for n in sizes
+        var x = fill[T](n)
+        var y = fill[T](n)
+        val xs = x.view()
+        val ys = y.view()
+        val nn = i32(n)
+        val reps = int(work / (2.0 * f64(n))) + 1
+        val alpha = T.from_unit(1e-9)
+        val dot_ours = best(n, reps, () -> dot(view(xs), view(ys)))
+        val dot_theirs = best(n, reps, () -> T.o_dot(nn, as_mut_ptr(xs), 1, as_mut_ptr(ys), 1))
+        val axpy_ours = best(n, reps, () -> axpy(alpha, view(xs), view_mut(black_box(ys))))
+        val axpy_theirs = best(n, reps, () -> T.o_axpy(nn, alpha, as_mut_ptr(xs), 1, black_box(as_mut_ptr(ys)), 1))
+        print(f"${name}%-4s ${n}%8d  dot ${dot_ours}%7.2f ${dot_theirs}%7.2f  ${100.0 * dot_ours / dot_theirs}%4.0f   axpy ${axpy_ours}%7.2f ${axpy_theirs}%7.2f  ${100.0 * axpy_ours / axpy_theirs}%4.0f")
+
+main()
+    print("GFLOPS: sysl, Accelerate, and sysl as a percentage of Accelerate")
+    bench_width[f64]("f64")
+    bench_width[f32]("f32")
