@@ -59,7 +59,7 @@ struct StridedMut[T]
 /** Where the view's first element is in `data`, and how far apart its elements are. */
 private start(len: usize, inc: int) -> int = if inc >= 0 then 0 else (int(len) - 1) * -inc
 
-private covers(have: usize, len: usize, inc: int) -> bool = len == 0 || (int(len) - 1) * inc.abs() < int(have)
+private[blas] covers(have: usize, len: usize, inc: int) -> bool = len == 0 || (int(len) - 1) * inc.abs() < int(have)
 
 /** Every element of `data`, contiguous. */
 view[T](data: []const T) -> Strided[T] = Strided(data, data.len, 1)

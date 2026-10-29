@@ -1,20 +1,60 @@
 import sh.sysl.blas.*
-import sh.sysl.cblas.Oracle
-import sysl.slices.as_mut_ptr
+import sh.sysl.cblas.{Oracle, Lib, libs}
+import sysl.slices.{as_mut_ptr, sort_by}
 import sysl.time.monotonic
 import sysl.hint.black_box
 import sysl.buf.{Buf, buf}
 
-// dot and axpy, sh.sysl.blas against the platform's CBLAS, at sizes that live in L1, in L2, and in
-// main memory. Each figure is the best of several trials, each trial long enough that the
-// microsecond clock is not what is measured. Both routines count 2n floating-point operations.
+// Every contiguous Level 1 routine of sh.sysl.blas against Accelerate and OpenBLAS, at a size that
+// lives in L1, one in L2, and one in main memory. The three implementations are timed in turn
+// within each trial, so a change in the machine's load lands on all three alike, and the figure
+// reported is the median of the trials. Each trial is about `work` elements, so the microsecond
+// clock is never what is measured.
+//
+// The unit is GB/s of vector data each call reads and writes (`bytes` below), which puts the
+// arithmetic routines and the moving ones on one scale. For `dot` and `axpy` it is GFLOPS times
+// `sizeof(T)` times 1.5 and 1 respectively.
 
-private val sizes: [4]usize = [1024, 16384, 262144, 4194304]
+private val sizes: [3]usize = [1024, 262144, 4194304]
+
+private val places: [3]string = ["L1", "L2", "DRAM"]
 
 private const trials = 7
 
-/** About this many operations per trial, so a small size runs many repetitions. */
-private const work: f64 = 4e8
+/** About this many elements per trial. */
+private const work: f64 = 1e8
+
+enum Op
+    Dot
+    Axpy
+    Scal
+    Asum
+    Nrm2
+    Iamax
+    Copy
+    Swap
+    Rot
+
+private val ops: [9]Op = [Op.Dot, Op.Axpy, Op.Scal, Op.Asum, Op.Nrm2, Op.Iamax, Op.Copy, Op.Swap, Op.Rot]
+
+impl Op
+    name(self) -> string = self match
+        Dot -> "dot"
+        Axpy -> "axpy"
+        Scal -> "scal"
+        Asum -> "asum"
+        Nrm2 -> "nrm2"
+        Iamax -> "iamax"
+        Copy -> "copy"
+        Swap -> "swap"
+        Rot -> "rot"
+
+    /** Vectors read plus vectors written per element. */
+    streams(self) -> usize = self match
+        Asum | Nrm2 | Iamax -> 1
+        Dot | Scal | Copy -> 2
+        Axpy -> 3
+        Swap | Rot -> 4
 
 private fill[T: Oracle](n: usize) -> Buf[T]
     var b: Buf[T] = buf()
@@ -22,36 +62,71 @@ private fill[T: Oracle](n: usize) -> Buf[T]
         b.push(T.from_unit(f64(i % 17) * 0.0625 - 0.5))
     b
 
-private seconds(us: long) -> f64 = f64(us) * 1e-6
+/** One call of `op` on `x` and `y` by implementation `who`: 0 is sysl, then `libs` in order.
+ *
+ * `scal` multiplies by a number a hair above one (and representable as more than one in f32), because
+ * both libraries return at once for exactly one; `rot` turns by a rotation; neither drifts towards
+ * overflow over a run.
+ */
+private once[T: Oracle](op: Op, who: usize, xs: []T, ys: []T)
+    val alpha = T.from_unit(1e-9)
+    val grow = T.from_unit(1 + 0x1p-20)
+    val c = T.from_unit(0.6)
+    val s = T.from_unit(0.8)
+    if who == 0
+        op match
+            Dot -> _ = black_box(dot(view(xs), view(ys)))
+            Axpy -> axpy(alpha, view(xs), view_mut(ys))
+            Scal -> scal(grow, view_mut(xs))
+            Asum -> _ = black_box(asum(view(xs)))
+            Nrm2 -> _ = black_box(nrm2(view(xs)))
+            Iamax -> _ = black_box(iamax(view(xs)))
+            Copy -> copy(view(xs), view_mut(ys))
+            Swap -> swap(view_mut(xs), view_mut(ys))
+            Rot -> rot(view_mut(xs), view_mut(ys), c, s)
+        return
+    val lib = libs[who - 1]
+    val n = i32(xs.len)
+    val px = as_mut_ptr(xs)
+    val py = as_mut_ptr(ys)
+    op match
+        Dot -> _ = black_box(T.o_dot(lib, n, px, 1, py, 1))
+        Axpy -> T.o_axpy(lib, n, alpha, px, 1, py, 1)
+        Scal -> T.o_scal(lib, n, grow, px, 1)
+        Asum -> _ = black_box(T.o_asum(lib, n, px, 1))
+        Nrm2 -> _ = black_box(T.o_nrm2(lib, n, px, 1))
+        Iamax -> _ = black_box(T.o_iamax(lib, n, px, 1))
+        Copy -> T.o_copy(lib, n, px, 1, py, 1)
+        Swap -> T.o_swap(lib, n, px, 1, py, 1)
+        Rot -> T.o_rot(lib, n, px, 1, py, 1, c, s)
 
-/** Best GFLOPS over the trials of `reps` calls of `body`, each worth `2n` operations. */
-private best[R](n: usize, reps: int, body: &Fn() -> R) -> f64
-    var top = 0.0
-    for _ in 0..<trials
-        val t0 = monotonic().us
-        for _ in 0..<reps
-            black_box(body())
-        val dt = seconds(monotonic().us - t0)
-        val g = 2.0 * f64(n) * f64(reps) / dt * 1e-9
-        if g > top then top = g
-    top
+private median(xs: []f64) -> f64
+    sort_by(xs, (a, b) -> a < b)
+    xs[xs.len / 2]
 
 private bench_width[T: Oracle](name: string)
-    for n in sizes
+    for k in 0..<sizes.len
+        val n = sizes[k]
         var x = fill[T](n)
         var y = fill[T](n)
-        val xs = x.view()
-        val ys = y.view()
-        val nn = i32(n)
-        val reps = int(work / (2.0 * f64(n))) + 1
-        val alpha = T.from_unit(1e-9)
-        val dot_ours = best(n, reps, () -> dot(view(xs), view(ys)))
-        val dot_theirs = best(n, reps, () -> T.o_dot(nn, as_mut_ptr(xs), 1, as_mut_ptr(ys), 1))
-        val axpy_ours = best(n, reps, () -> axpy(alpha, view(xs), view_mut(black_box(ys))))
-        val axpy_theirs = best(n, reps, () -> T.o_axpy(nn, alpha, as_mut_ptr(xs), 1, black_box(as_mut_ptr(ys)), 1))
-        print(f"${name}%-4s ${n}%8d  dot ${dot_ours}%7.2f ${dot_theirs}%7.2f  ${100.0 * dot_ours / dot_theirs}%4.0f   axpy ${axpy_ours}%7.2f ${axpy_theirs}%7.2f  ${100.0 * axpy_ours / axpy_theirs}%4.0f")
+        val reps = int(work / f64(n)) + 1
+        for op in ops
+            var rates: [3][trials]f64
+            for t in 0..<trials
+                for who in 0..<3
+                    val t0 = monotonic().us
+                    for _ in 0..<reps
+                        once(op, who, black_box(x.view()), black_box(y.view()))
+                    val dt = f64(monotonic().us - t0) * 1e-6
+                    rates[who][t] = f64(op.streams() * sizeof(T) * n) * f64(reps) / dt * 1e-9
+            val ours = median(rates[0][..])
+            val acc = median(rates[1][..])
+            val ob = median(rates[2][..])
+            print(f"| ${name} | ${op.name()} | ${places[k]} ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
 main()
-    print("GFLOPS: sysl, Accelerate, and sysl as a percentage of Accelerate")
+    print(f"GB/s, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
+    print("| type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |")
+    print("|---|---|---|---:|---:|---:|---:|---:|")
     bench_width[f64]("f64")
     bench_width[f32]("f32")

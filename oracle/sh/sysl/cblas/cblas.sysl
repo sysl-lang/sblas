@@ -3,9 +3,26 @@ module sh.sysl.cblas
 
 import sh.sysl.blas.Real
 
-// The Level 1 routines of the platform's CBLAS — Accelerate on macOS, where libcblas resolves into
-// vecLib — declared for the checks and the benchmarks to measure sh.sysl.blas against. A CBLAS
-// pointer is the lowest address a vector covers, whatever the sign of its stride.
+// The Level 1 routines of two CBLAS implementations, declared for the checks and the benchmarks to
+// measure sh.sysl.blas against: the platform's (Accelerate on macOS, where libcblas resolves into
+// vecLib) and OpenBLAS. A CBLAS pointer is the lowest address a vector covers, whatever the sign of
+// its stride.
+//
+// The two export the same names, so only Accelerate is linked; OpenBLAS is loaded at run time and
+// reached through `openblas.c`, whose `sysl_ob_*` functions call OpenBLAS's own entry points.
+
+/** Which CBLAS a call goes to. */
+enum Lib
+    Accelerate
+    OpenBLAS
+
+/** Both, in the order a check or a benchmark reports them. */
+val libs: [2]Lib = [Lib.Accelerate, Lib.OpenBLAS]
+
+impl Lib
+    name(self) -> string = self match
+        Accelerate -> "Accelerate"
+        OpenBLAS -> "OpenBLAS"
 
 extern "cblas_ddot" c_ddot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) -> f64
 extern "cblas_sdot" c_sdot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32
@@ -28,42 +45,129 @@ extern "cblas_srotg" c_srotg(a: *f32, b: *f32, c: *f32, s: *f32)
 extern "cblas_idamax" c_idamax(n: i32, x: *f64, incx: i32) -> i32
 extern "cblas_isamax" c_isamax(n: i32, x: *f32, incx: i32) -> i32
 
-/** One width's CBLAS entry points, so a check or a benchmark is written once for both widths. */
+/** 1 when OpenBLAS's `cblas_ddot` is a different function from the one the link bound. */
+@needs(os)
+extern "sysl_ob_distinct" ob_distinct() -> int
+
+@needs(os)
+extern "sysl_ob_ddot" ob_ddot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) -> f64
+@needs(os)
+extern "sysl_ob_sdot" ob_sdot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32
+@needs(os)
+extern "sysl_ob_daxpy" ob_daxpy(n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32)
+@needs(os)
+extern "sysl_ob_saxpy" ob_saxpy(n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32)
+@needs(os)
+extern "sysl_ob_dnrm2" ob_dnrm2(n: i32, x: *f64, incx: i32) -> f64
+@needs(os)
+extern "sysl_ob_snrm2" ob_snrm2(n: i32, x: *f32, incx: i32) -> f32
+@needs(os)
+extern "sysl_ob_dasum" ob_dasum(n: i32, x: *f64, incx: i32) -> f64
+@needs(os)
+extern "sysl_ob_sasum" ob_sasum(n: i32, x: *f32, incx: i32) -> f32
+@needs(os)
+extern "sysl_ob_dscal" ob_dscal(n: i32, alpha: f64, x: *f64, incx: i32)
+@needs(os)
+extern "sysl_ob_sscal" ob_sscal(n: i32, alpha: f32, x: *f32, incx: i32)
+@needs(os)
+extern "sysl_ob_dcopy" ob_dcopy(n: i32, x: *f64, incx: i32, y: *f64, incy: i32)
+@needs(os)
+extern "sysl_ob_scopy" ob_scopy(n: i32, x: *f32, incx: i32, y: *f32, incy: i32)
+@needs(os)
+extern "sysl_ob_dswap" ob_dswap(n: i32, x: *f64, incx: i32, y: *f64, incy: i32)
+@needs(os)
+extern "sysl_ob_sswap" ob_sswap(n: i32, x: *f32, incx: i32, y: *f32, incy: i32)
+@needs(os)
+extern "sysl_ob_drot" ob_drot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32, c: f64, s: f64)
+@needs(os)
+extern "sysl_ob_srot" ob_srot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32, c: f32, s: f32)
+@needs(os)
+extern "sysl_ob_drotg" ob_drotg(a: *f64, b: *f64, c: *f64, s: *f64)
+@needs(os)
+extern "sysl_ob_srotg" ob_srotg(a: *f32, b: *f32, c: *f32, s: *f32)
+@needs(os)
+extern "sysl_ob_idamax" ob_idamax(n: i32, x: *f64, incx: i32) -> i32
+@needs(os)
+extern "sysl_ob_isamax" ob_isamax(n: i32, x: *f32, incx: i32) -> i32
+
+/** One width's CBLAS entry points in both libraries, so a check or a benchmark is written once for
+ * both widths and both libraries.
+ */
 trait Oracle: Real
     from_unit(u: f64) -> Self
-    o_dot(n: i32, x: *Self, incx: i32, y: *Self, incy: i32) -> Self
-    o_axpy(n: i32, alpha: Self, x: *Self, incx: i32, y: *Self, incy: i32)
-    o_nrm2(n: i32, x: *Self, incx: i32) -> Self
-    o_asum(n: i32, x: *Self, incx: i32) -> Self
-    o_scal(n: i32, alpha: Self, x: *Self, incx: i32)
-    o_copy(n: i32, x: *Self, incx: i32, y: *Self, incy: i32)
-    o_swap(n: i32, x: *Self, incx: i32, y: *Self, incy: i32)
-    o_rot(n: i32, x: *Self, incx: i32, y: *Self, incy: i32, c: Self, s: Self)
-    o_rotg(a: *Self, b: *Self, c: *Self, s: *Self)
-    o_iamax(n: i32, x: *Self, incx: i32) -> i32
+    o_dot(lib: Lib, n: i32, x: *Self, incx: i32, y: *Self, incy: i32) -> Self
+    o_axpy(lib: Lib, n: i32, alpha: Self, x: *Self, incx: i32, y: *Self, incy: i32)
+    o_nrm2(lib: Lib, n: i32, x: *Self, incx: i32) -> Self
+    o_asum(lib: Lib, n: i32, x: *Self, incx: i32) -> Self
+    o_scal(lib: Lib, n: i32, alpha: Self, x: *Self, incx: i32)
+    o_copy(lib: Lib, n: i32, x: *Self, incx: i32, y: *Self, incy: i32)
+    o_swap(lib: Lib, n: i32, x: *Self, incx: i32, y: *Self, incy: i32)
+    o_rot(lib: Lib, n: i32, x: *Self, incx: i32, y: *Self, incy: i32, c: Self, s: Self)
+    o_rotg(lib: Lib, a: *Self, b: *Self, c: *Self, s: *Self)
+    o_iamax(lib: Lib, n: i32, x: *Self, incx: i32) -> i32
 
 impl Oracle for f64
     from_unit(u: f64) -> f64 = u
-    o_dot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) -> f64 = c_ddot(n, x, incx, y, incy)
-    o_axpy(n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32) = c_daxpy(n, alpha, x, incx, y, incy)
-    o_nrm2(n: i32, x: *f64, incx: i32) -> f64 = c_dnrm2(n, x, incx)
-    o_asum(n: i32, x: *f64, incx: i32) -> f64 = c_dasum(n, x, incx)
-    o_scal(n: i32, alpha: f64, x: *f64, incx: i32) = c_dscal(n, alpha, x, incx)
-    o_copy(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) = c_dcopy(n, x, incx, y, incy)
-    o_swap(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) = c_dswap(n, x, incx, y, incy)
-    o_rot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32, c: f64, s: f64) = c_drot(n, x, incx, y, incy, c, s)
-    o_rotg(a: *f64, b: *f64, c: *f64, s: *f64) = c_drotg(a, b, c, s)
-    o_iamax(n: i32, x: *f64, incx: i32) -> i32 = c_idamax(n, x, incx)
+    o_dot(lib: Lib, n: i32, x: *f64, incx: i32, y: *f64, incy: i32) -> f64 = lib match
+        Accelerate -> c_ddot(n, x, incx, y, incy)
+        OpenBLAS -> ob_ddot(n, x, incx, y, incy)
+    o_axpy(lib: Lib, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32) = lib match
+        Accelerate -> c_daxpy(n, alpha, x, incx, y, incy)
+        OpenBLAS -> ob_daxpy(n, alpha, x, incx, y, incy)
+    o_nrm2(lib: Lib, n: i32, x: *f64, incx: i32) -> f64 = lib match
+        Accelerate -> c_dnrm2(n, x, incx)
+        OpenBLAS -> ob_dnrm2(n, x, incx)
+    o_asum(lib: Lib, n: i32, x: *f64, incx: i32) -> f64 = lib match
+        Accelerate -> c_dasum(n, x, incx)
+        OpenBLAS -> ob_dasum(n, x, incx)
+    o_scal(lib: Lib, n: i32, alpha: f64, x: *f64, incx: i32) = lib match
+        Accelerate -> c_dscal(n, alpha, x, incx)
+        OpenBLAS -> ob_dscal(n, alpha, x, incx)
+    o_copy(lib: Lib, n: i32, x: *f64, incx: i32, y: *f64, incy: i32) = lib match
+        Accelerate -> c_dcopy(n, x, incx, y, incy)
+        OpenBLAS -> ob_dcopy(n, x, incx, y, incy)
+    o_swap(lib: Lib, n: i32, x: *f64, incx: i32, y: *f64, incy: i32) = lib match
+        Accelerate -> c_dswap(n, x, incx, y, incy)
+        OpenBLAS -> ob_dswap(n, x, incx, y, incy)
+    o_rot(lib: Lib, n: i32, x: *f64, incx: i32, y: *f64, incy: i32, c: f64, s: f64) = lib match
+        Accelerate -> c_drot(n, x, incx, y, incy, c, s)
+        OpenBLAS -> ob_drot(n, x, incx, y, incy, c, s)
+    o_rotg(lib: Lib, a: *f64, b: *f64, c: *f64, s: *f64) = lib match
+        Accelerate -> c_drotg(a, b, c, s)
+        OpenBLAS -> ob_drotg(a, b, c, s)
+    o_iamax(lib: Lib, n: i32, x: *f64, incx: i32) -> i32 = lib match
+        Accelerate -> c_idamax(n, x, incx)
+        OpenBLAS -> ob_idamax(n, x, incx)
 
 impl Oracle for f32
     from_unit(u: f64) -> f32 = f32(u)
-    o_dot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32 = c_sdot(n, x, incx, y, incy)
-    o_axpy(n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32) = c_saxpy(n, alpha, x, incx, y, incy)
-    o_nrm2(n: i32, x: *f32, incx: i32) -> f32 = c_snrm2(n, x, incx)
-    o_asum(n: i32, x: *f32, incx: i32) -> f32 = c_sasum(n, x, incx)
-    o_scal(n: i32, alpha: f32, x: *f32, incx: i32) = c_sscal(n, alpha, x, incx)
-    o_copy(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) = c_scopy(n, x, incx, y, incy)
-    o_swap(n: i32, x: *f32, incx: i32, y: *f32, incy: i32) = c_sswap(n, x, incx, y, incy)
-    o_rot(n: i32, x: *f32, incx: i32, y: *f32, incy: i32, c: f32, s: f32) = c_srot(n, x, incx, y, incy, c, s)
-    o_rotg(a: *f32, b: *f32, c: *f32, s: *f32) = c_srotg(a, b, c, s)
-    o_iamax(n: i32, x: *f32, incx: i32) -> i32 = c_isamax(n, x, incx)
+    o_dot(lib: Lib, n: i32, x: *f32, incx: i32, y: *f32, incy: i32) -> f32 = lib match
+        Accelerate -> c_sdot(n, x, incx, y, incy)
+        OpenBLAS -> ob_sdot(n, x, incx, y, incy)
+    o_axpy(lib: Lib, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32) = lib match
+        Accelerate -> c_saxpy(n, alpha, x, incx, y, incy)
+        OpenBLAS -> ob_saxpy(n, alpha, x, incx, y, incy)
+    o_nrm2(lib: Lib, n: i32, x: *f32, incx: i32) -> f32 = lib match
+        Accelerate -> c_snrm2(n, x, incx)
+        OpenBLAS -> ob_snrm2(n, x, incx)
+    o_asum(lib: Lib, n: i32, x: *f32, incx: i32) -> f32 = lib match
+        Accelerate -> c_sasum(n, x, incx)
+        OpenBLAS -> ob_sasum(n, x, incx)
+    o_scal(lib: Lib, n: i32, alpha: f32, x: *f32, incx: i32) = lib match
+        Accelerate -> c_sscal(n, alpha, x, incx)
+        OpenBLAS -> ob_sscal(n, alpha, x, incx)
+    o_copy(lib: Lib, n: i32, x: *f32, incx: i32, y: *f32, incy: i32) = lib match
+        Accelerate -> c_scopy(n, x, incx, y, incy)
+        OpenBLAS -> ob_scopy(n, x, incx, y, incy)
+    o_swap(lib: Lib, n: i32, x: *f32, incx: i32, y: *f32, incy: i32) = lib match
+        Accelerate -> c_sswap(n, x, incx, y, incy)
+        OpenBLAS -> ob_sswap(n, x, incx, y, incy)
+    o_rot(lib: Lib, n: i32, x: *f32, incx: i32, y: *f32, incy: i32, c: f32, s: f32) = lib match
+        Accelerate -> c_srot(n, x, incx, y, incy, c, s)
+        OpenBLAS -> ob_srot(n, x, incx, y, incy, c, s)
+    o_rotg(lib: Lib, a: *f32, b: *f32, c: *f32, s: *f32) = lib match
+        Accelerate -> c_srotg(a, b, c, s)
+        OpenBLAS -> ob_srotg(a, b, c, s)
+    o_iamax(lib: Lib, n: i32, x: *f32, incx: i32) -> i32 = lib match
+        Accelerate -> c_isamax(n, x, incx)
+        OpenBLAS -> ob_isamax(n, x, incx)

@@ -24,16 +24,27 @@ so element 0 is the last element the view covers. `strided` checks that the slic
 and two views of different lengths trap.
 
 ```
-dependencies { blas = "github.com/sysl-lang/blas" }
+dependencies {
+  blas { git = "github.com/sysl-lang/blas", version = "0.1.0" }
+}
 ```
+
+Needs sysl 0.8.0.
 
 ## Layout
 
 | directory | what |
 |---|---|
 | `sh/sysl/blas/` | the package, and its tests against the definitions (`nrm2`'s range, `rotg`'s signs, `iamax`'s ties) |
-| `oracle/` | the platform's CBLAS declared behind one trait for both widths, and the tests comparing every routine with it on generated data at every stride sign |
-| `bench/` | GFLOPS against the platform's CBLAS; figures in [bench/README.md](bench/README.md) |
+| `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign |
+| `bench/` | GB/s of every contiguous routine against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
+
+## Speed
+
+`dot`, `axpy`, `scal`, `copy`, `swap` and `rot` run a contiguous kernel over eight 128-bit registers
+per step. `asum`, `nrm2` and `iamax` are scalar until sysl 0.8.1 gives a vector a lane-wise `abs`;
+every vector load is still bounds-checked as a run, since sysl's `@unchecked` does not reach one.
+Both are written up as sysl findings in [DESIGN.md](DESIGN.md#gaps-found-so-far).
 
 `sysl test .` runs the package and the oracle; under ASan,
 `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`.

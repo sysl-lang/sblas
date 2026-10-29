@@ -109,18 +109,24 @@ non-positive stride on a one-vector routine is a quick return there, a view here
 
 ## Where sysl 0.8.0 matters
 
-Written against the installed 0.7.10; correct now, and these are the places 0.8.0 changes:
+The package needs 0.8.0 (`sysl = "0.8.0"`):
 
-- **Unchecked access in the kernels.** The disassembly of the contiguous `dot` and `axpy` kernels
-  shows the loads already vectorized and fused (`ldp q` pairs into four `fmla.2d`), with **two bounds
-  checks per step** — one per `load`/`store` — that the loop condition `i + W <= len` already
-  guarantees. The scalar strided walks check every element. `get_unchecked` / `@unchecked` removes
-  both, after the view constructor has checked the extent once.
+- **Unchecked access in the walks.** A strided walk checks once, before it starts, that the view's
+  last element is inside its data (`walkable`), then reads and writes inside an `@unchecked` block.
+  Before, every element carried a compare and a branch the optimizer could not remove, since the
+  stride arithmetic is beyond what it proves. A view built by hand rather than by `strided` is caught
+  by the same check, and the tests trap one in each direction.
+- **Not in the kernels, because 0.8.0 cannot reach them.** A contiguous kernel's cost is its vector
+  `load`/`store`, each checked as a run (`i <= len - W`), and **`@unchecked` does not cover a vector
+  load** — it is a method, not a subscript — and there is no `load_unchecked`. So `dot` and `axpy` each
+  keep two compare-and-branch pairs per step (`axpy`'s load and store of `y` share one). A kernel's scalar tail needs nothing: the
+  optimizer proves its subscripts itself. This is sysl finding F1 below.
 - **Packing and the micro-kernel** index computed offsets inside the innermost loops, where a check is
   a compare and a branch per element; those loops are written for unchecked access from the start.
-- **Build modes.** The tests run in debug, which from 0.8.0 traps on integer overflow; nothing here
-  relies on wrapping (the test data generator is a xorshift, which only shifts and xors). `+%` is not
-  needed.
+- **Build modes.** The tests run in debug, which traps on integer overflow. The one trap the 0.7.10
+  code met was a real bug, in the oracle check: `n - 1 - forwards` was computed for an empty vector,
+  where it is meaningless and underflows; the empty case is now checked on its own. Nothing here
+  relies on wrapping (the test data generator is a xorshift, which only shifts and xors).
 
 ## Threading
 
@@ -140,9 +146,13 @@ package's, not one this library starts per call.
   points behind a trait, `Oracle`, implemented for f32 and f64, so each check is written once for both
   widths. It is its own project so that the `blas` package links nothing. CBLAS refuses a negative
   stride on a one-vector routine, so those checks walk the oracle forwards and mirror `iamax`'s index.
-- **OpenBLAS**: `sudo -n -u work -H /opt/homebrew/bin/brew install openblas`, then the same `Oracle`
-  trait over its `libopenblas` (`--link-path /opt/homebrew/opt/openblas/lib`). It is the like-for-like
-  speed baseline (NEON, no matrix unit), and on Linux the only oracle.
+- **OpenBLAS**: `sudo -n -u work -H /opt/homebrew/bin/brew install openblas`. It exports the same
+  `cblas_*` names as Accelerate, and a Mach-O link binds each name to one library, so it is not
+  linked: `oracle/sh/sysl/cblas/openblas.c` `dlopen`s it (`$SYSL_OPENBLAS`, else Homebrew's path)
+  with `RTLD_LOCAL`, pins it to one thread, and forwards `sysl_ob_*` to its entry points. Every
+  `Oracle` method takes a `Lib`, and every check runs against both; one test proves the two
+  `cblas_ddot`s live in different images. OpenBLAS is the like-for-like speed baseline (NEON, no
+  matrix unit), and on Linux the only oracle.
 - **netlib**: the reference test programs (`dblat1.f`, `sblat1.f`, `dblat2.f`, `dblat3.f`) carry
   hand-derived expected values for small fixed inputs, including every stride sign; porting their
   tables gives a check that depends on no vendor. Level 1's netlib edges — `rotg`'s sign conventions,
@@ -153,12 +163,12 @@ Every test runs under ASan as well (`SYSL_EXTRA_CFLAGS="-fsanitize=address -g" s
 
 ## Benchmark method
 
-`bench/` times sysl against the oracle at sizes chosen to live in L1, in L2, and in main memory, and
-prints GFLOPS (2n operations for dot and axpy; 2mnk for gemm). Each figure is the best of seven
-trials, each trial long enough (about 4e8 operations) that the microsecond clock is not what is
-measured. Runs are `caffeinate -dimsu` on a quiet machine, with `VECLIB_MAXIMUM_THREADS=1` (and
-`OPENBLAS_NUM_THREADS=1`) for single-thread figures, and record the chip and the load average beside
-the numbers.
+`bench/` times every contiguous Level 1 routine of sysl, Accelerate and OpenBLAS at sizes chosen to
+live in L1, in L2, and in main memory, and prints GB/s of vector data read and written (2mnk GFLOPS
+for gemm, when it exists). Within each trial the three run in turn, so a change in the machine's
+load lands on all three alike; each figure is the median of seven trials of about 1e8 elements.
+Runs are `caffeinate -dimsu` with `VECLIB_MAXIMUM_THREADS=1` (OpenBLAS is pinned to one thread when
+it is loaded), and record the chip and the load average beside the numbers.
 
 **On M4 and later, Accelerate uses the SME matrix unit**, which NEON code cannot match: on the M5 Pro
 Accelerate's f64 `dot` reaches about 88 GFLOPS on L2-resident data single-threaded, several times what
@@ -167,13 +177,25 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 
 ## Gaps found so far
 
-- **No fused multiply-add on a vector.** `a.mul_add(b, c)` exists for `f32`/`f64` and is refused on
-  `<W>T`: `type '<8>real' has no method 'mul_add'`. At `optimization = "2"` the back end contracts
-  `a * b + c` into `fmla` anyway, so Level 1 is not slowed; but a micro-kernel cannot *ask* for the
-  fused form, and whether it gets one is a back-end choice rather than the program's.
-- **No lane-wise absolute value.** `type '<2>real' has no method 'abs'`. `asum`, `nrm2` and `iamax`
-  are scalar loops because of it; the alternative, `(v < 0).select(-v, v)`, is the longhand a missing
-  operation forces.
+- **F1: a vector load or store cannot be unchecked.** `@unchecked` covers subscripts, and `x.load(i)`
+  / `y.store(i, v)` are methods, so inside the block they still compare `i` against `len - W` and
+  branch to `sysl_bounds_fail` (checked in the emitted IR of a three-line probe: `x[i]` loses its
+  check, `x.load(i)` keeps `icmp ule` + `br` to `bounds.bad`). There is no `load_unchecked` either.
+  The check is not removable by the optimizer, because the loop's `i + W <= len` is not known not to
+  wrap. In the `dot` kernel's loop that is 4 of 27 instructions (`cmp`/`b.hi` twice) beside 8 `ldp q`
+  and 8 `fmla.2d`; OpenBLAS's `daxpy` loop has none, and unrolls 32 elements with `prfm` 0x380 ahead.
+  The fix in sysl: `@unchecked` reaching a vector load and store (the reference's "every subscript
+  written inside it" read to include them), or `load_unchecked`/`store_unchecked`. Its cost is
+  measured by a C replica of the same kernel with and without the checks (`bench/README.md`).
+- **F2: no lane-wise absolute value** (`type '<2>real' has no method 'abs'`; sysl 0.8.1 adds it).
+  `asum`, `nrm2` and `iamax` are scalar walks because of it: `asum` and `iamax` need `|v|`, and
+  `nrm2`'s band test is `|v| > t`. The longhands — `(v < 0).select(-v, v)`, or `(v > t) | (v < -t)` —
+  compile well (LLVM turns the second into `fabs.2d` + `fcmgt.2d`), which is exactly why they would
+  be copied; they are not written here. With it, all three take a contiguous kernel; a scalar
+  reduction cannot be vectorized by the back end, since it may not reassociate a float sum.
+- **Vector `mul_add`** (sysl 0.8.1). `a * b + c` already contracts to `fmla` at `optimization = "2"`
+  (`dot`, `axpy`, `rot` all use `fmla.2d`/`fmla.4s`), so Level 1 is not slowed; it is for the
+  micro-kernel, which must be able to ask for the fused form rather than hope for it.
 - **An `impl` in a `@tests` file is refused for a builtin type even when the trait is the file's
   own.** The stated reason — a trait answering differently in tests and in the shipped program — does
   not arise for a trait that exists only in tests. This is why the oracle trait lives in the `oracle/`

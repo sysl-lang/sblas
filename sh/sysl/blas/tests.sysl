@@ -29,6 +29,29 @@ view_past_the_end()
     val v = strided(xs[..], 3, -2)
     assert(v.len == 3)
 
+// A view built without `strided` is not checked when it is made, so a walk checks it before reading.
+
+@test("a hand-built view past its data traps before asum's walk reads it", should_trap)
+walk_past_the_end_reading()
+    val xs: [4]f64 = [1, 2, 3, 4]
+    print(asum(Strided(xs[..], 3, 2)))
+
+@test("a hand-built view past its data traps before dot's walk reads it", should_trap)
+walk_past_the_end_pair()
+    val xs: [4]f64 = [1, 2, 3, 4]
+    print(dot(view(xs[0..<2]), Strided(xs[..], 2, -4)))
+
+@test("a hand-built view past its data traps before swap's walk writes it", should_trap)
+walk_past_the_end_writing()
+    var xs: [4]f64 = [1, 2, 3, 4]
+    var ys: [8]f64
+    swap(strided_mut(ys[..], 2, 3), StridedMut(xs[..], 2, 5))
+
+@test("a hand-built view that fits is walked as one made by strided")
+walk_hand_built()
+    val xs: [5]f64 = [1, 2, 3, 4, 5]
+    assert(asum(Strided(xs[..], 3, -2)) == 9 && iamax(Strided(xs[..], 3, 2)) == Some(2))
+
 @test("two vectors of different lengths trap", should_trap)
 length_mismatch()
     val xs: [4]f64 = [1, 2, 3, 4]
@@ -140,6 +163,63 @@ nrm2_nan_inf()
     assert(nrm2(view(n[..])).is_nan())
     val i: [2]f32 = [1, -f32.infinity()]
     assert(nrm2(view(i[..])) == f32.infinity())
+
+// Every band at every position of a run longer than a kernel step, read forwards, backwards and
+// every other element: the three must agree whichever path each takes, which is what a vector
+// kernel for nrm2 will have to meet.
+
+/** `nrm2` of `xs` forwards, backwards, and every other element of `wide`. */
+private nrm2_paths[T: Real](xs: []const T, wide: []T) -> (T, T, T)
+    for i in 0..<xs.len
+        wide[2 * i] = xs[i]
+        wide[2 * i + 1] = T.zero()
+    (nrm2(view(xs)), nrm2(strided(xs, xs.len, -1)), nrm2(strided(wide[0..<2 * xs.len], xs.len, 2)))
+
+private nrm2_paths_agree[T: Real](pattern: []const T, xs: []T, wide: []T) -> bool
+    for i in 0..<xs.len
+        xs[i] = pattern[i % pattern.len]
+    val (fwd, back, walk) = nrm2_paths(xs, wide)
+    close(fwd, walk, 4) && close(back, walk, 4)
+
+@test("nrm2 agrees forwards, backwards and strided over every band, f64")
+nrm2_kernel_bands_f64()
+    var xs: [40]f64
+    var wide: [80]f64
+    val every: [8]f64 = [1e300, -2e300, 1e-300, -3e-300, 0.5, -1, 1e-310, 7]
+    assert(nrm2_paths_agree(every[..], xs[..], wide[..]), "all three bands")
+    val no_big: [5]f64 = [1e-300, -3e-300, 0.5, -1, 1e-310]
+    assert(nrm2_paths_agree(no_big[..], xs[..], wide[..]), "small and middle")
+    val only_small: [3]f64 = [1e-300, -3e-300, 1e-310]
+    assert(nrm2_paths_agree(only_small[..], xs[..], wide[..]), "small only")
+    val only_big: [1]f64 = [1e300]
+    assert(nrm2_paths_agree(only_big[..], xs[0..<16], wide[..]), "big only")
+    assert(close(nrm2(view(xs[0..<16])), 4e300, 2), "sixteen of 1e300")
+
+@test("nrm2 agrees forwards, backwards and strided over every band, f32")
+nrm2_kernel_bands_f32()
+    var xs: [40]f32
+    var wide: [80]f32
+    val every: [8]f32 = [1e30, -2e30, 1e-30, -3e-30, 0.5, -1, 1e-40, 7]
+    assert(nrm2_paths_agree(every[..], xs[..], wide[..]), "all three bands")
+    val no_big: [5]f32 = [1e-30, -3e-30, 0.5, -1, 1e-40]
+    assert(nrm2_paths_agree(no_big[..], xs[..], wide[..]), "small and middle")
+    val only_small: [3]f32 = [1e-30, -3e-30, 1e-40]
+    assert(nrm2_paths_agree(only_small[..], xs[..], wide[..]), "small only")
+
+@test("a NaN or an infinity anywhere in a long run survives nrm2")
+nrm2_kernel_nan_inf()
+    var xs: [16]f64
+    for i in 0..<16
+        xs[i] = 1e-300
+    xs[5] = f64.nan()
+    assert(nrm2(view(xs[..])).is_nan(), "NaN among small values")
+    xs[5] = 1
+    xs[9] = -f64.infinity()
+    assert(nrm2(view(xs[..])) == f64.infinity(), "infinity among small values")
+    var fs: [32]f32
+    fs[30] = f32.nan()
+    fs[3] = 1e30
+    assert(nrm2(view(fs[..])).is_nan(), "NaN beside a big value")
 
 // --- iamax ----------------------------------------------------------------------------------------
 

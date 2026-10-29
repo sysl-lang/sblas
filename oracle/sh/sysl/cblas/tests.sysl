@@ -40,7 +40,7 @@ private near[T: Oracle](got: T, want: T, bound: T, ulps: T) -> bool = (got - wan
 
 // --- The checks ------------------------------------------------------------------------------------
 
-private check_reductions[T: Oracle](seed: u64)
+private check_reductions[T: Oracle](lib: Lib, seed: u64)
     var s = Stream(seed)
     var xb: [cap]T
     var yb: [cap]T
@@ -56,22 +56,24 @@ private check_reductions[T: Oracle](seed: u64)
             var bound = T.zero()
             for i in 0..<n
                 bound = bound + (x.at(i) * y.at(i)).abs()
-            val want = T.o_dot(nn, as_mut_ptr(xs), i32(incx), as_mut_ptr(ys), i32(incy))
+            val want = T.o_dot(lib, nn, as_mut_ptr(xs), i32(incx), as_mut_ptr(ys), i32(incy))
             assert(near(dot(x, y), want, bound, T.from_unit(f64(n + 1))), "dot")
             // CBLAS refuses a negative stride for a one-vector routine, so the oracle walks the same
             // elements forwards; for iamax that reverses the order, and the index is mirrored back.
             val ax = i32(incx.abs())
-            assert(near(nrm2(x), T.o_nrm2(nn, as_mut_ptr(xs), ax), T.zero(), 4), "nrm2")
-            assert(near(asum(x), T.o_asum(nn, as_mut_ptr(xs), ax), T.zero(), T.from_unit(f64(n + 1))), "asum")
-            val got = iamax(x)
-            val forwards = usize(T.o_iamax(nn, as_mut_ptr(xs), ax))
-            val want_max = if incx < 0 then n - 1 - forwards else forwards
-            assert(if n == 0 then got == None else got == Some(want_max), "iamax")
+            assert(near(nrm2(x), T.o_nrm2(lib, nn, as_mut_ptr(xs), ax), T.zero(), 4), "nrm2")
+            assert(near(asum(x), T.o_asum(lib, nn, as_mut_ptr(xs), ax), T.zero(), T.from_unit(f64(n + 1))), "asum")
+            if n == 0
+                assert(iamax(x) == None, "iamax of nothing")
+            else
+                val forwards = usize(T.o_iamax(lib, nn, as_mut_ptr(xs), ax))
+                val want_max = if incx < 0 then n - 1 - forwards else forwards
+                assert(iamax(x) == Some(want_max), "iamax")
 
 /** Runs a two-vector update through both implementations on equal copies of the whole storage, so a
  * write between the strided elements shows up as well as a wrong one.
  */
-private check_updates[T: Oracle](seed: u64)
+private check_updates[T: Oracle](lib: Lib, seed: u64)
     var s = Stream(seed)
     var xa: [cap]T
     var ya: [cap]T
@@ -101,41 +103,41 @@ private check_updates[T: Oracle](seed: u64)
                 op match
                     0 ->
                         axpy(alpha, x.as_view(), y)
-                        T.o_axpy(nn, alpha, px, ix, py, iy)
+                        T.o_axpy(lib, nn, alpha, px, ix, py, iy)
                     1 ->
                         scal(alpha, x)
-                        T.o_scal(nn, alpha, px, i32(incx.abs()))
+                        T.o_scal(lib, nn, alpha, px, i32(incx.abs()))
                     2 ->
                         copy(x.as_view(), y)
-                        T.o_copy(nn, px, ix, py, iy)
+                        T.o_copy(lib, nn, px, ix, py, iy)
                     3 ->
                         swap(x, y)
-                        T.o_swap(nn, px, ix, py, iy)
+                        T.o_swap(lib, nn, px, ix, py, iy)
                     else
                         rot(x, y, c, sn)
-                        T.o_rot(nn, px, ix, py, iy, c, sn)
+                        T.o_rot(lib, nn, px, ix, py, iy, c, sn)
                 for i in 0..<lx
                     assert(near(xa[i], xb[i], T.one(), 4), "x after an update")
                 for i in 0..<ly
                     assert(near(ya[i], yb[i], alpha.abs() + T.one(), 4), "y after an update")
 
-private check_rotg[T: Oracle](a: T, b: T)
+private check_rotg[T: Oracle](lib: Lib, a: T, b: T)
     var ra = a
     var rb = b
     var c = T.zero()
     var sn = T.zero()
-    T.o_rotg(&ra, &rb, &c, &sn)
+    T.o_rotg(lib, &ra, &rb, &c, &sn)
     val g = rotg(a, b)
     assert(near(g.c, c, T.zero(), 2) && near(g.s, sn, T.zero(), 2), "rotg c and s")
     assert(near(g.r, ra, T.zero(), 2) && near(g.z, rb, T.zero(), 2), "rotg r and z")
 
-private check_rotg_cases[T: Oracle]()
+private check_rotg_cases[T: Oracle](lib: Lib)
     val vals: [9]f64 = [0, 1, -1, 3, -4, 0.5, -2, 1e-3, 7]
     for a in vals
         for b in vals
-            check_rotg(T.from_unit(a), T.from_unit(b))
+            check_rotg(lib, T.from_unit(a), T.from_unit(b))
 
-private check_iamax_ties[T: Oracle]()
+private check_iamax_ties[T: Oracle](lib: Lib)
     var xs: [6]T
     val vals: [6]f64 = [1, -3, 3, 2, -3, 3]
     for i in 0..<6
@@ -144,30 +146,44 @@ private check_iamax_ties[T: Oracle]()
     for inc in [1, 2, 3]
         val n = (6 - 1) / usize(inc.abs()) + 1
         val got = iamax(strided(xs[..], n, inc))
-        assert(got == Some(usize(T.o_iamax(i32(n), as_mut_ptr(xs[..]), i32(inc)))), "iamax tie")
+        assert(got == Some(usize(T.o_iamax(lib, i32(n), as_mut_ptr(xs[..]), i32(inc)))), "iamax tie")
 
-@test("dot, nrm2, asum and iamax agree with the platform BLAS, f64")
+@test("dot, nrm2, asum and iamax agree with Accelerate and OpenBLAS, f64")
 oracle_reductions_f64()
-    check_reductions[f64](1)
+    for lib in libs
+        check_reductions[f64](lib, 1)
 
-@test("dot, nrm2, asum and iamax agree with the platform BLAS, f32")
+@test("dot, nrm2, asum and iamax agree with Accelerate and OpenBLAS, f32")
 oracle_reductions_f32()
-    check_reductions[f32](2)
+    for lib in libs
+        check_reductions[f32](lib, 2)
 
-@test("axpy, scal, copy, swap and rot agree with the platform BLAS, f64")
+@test("axpy, scal, copy, swap and rot agree with Accelerate and OpenBLAS, f64")
 oracle_updates_f64()
-    check_updates[f64](3)
+    for lib in libs
+        check_updates[f64](lib, 3)
 
-@test("axpy, scal, copy, swap and rot agree with the platform BLAS, f32")
+@test("axpy, scal, copy, swap and rot agree with Accelerate and OpenBLAS, f32")
 oracle_updates_f32()
-    check_updates[f32](4)
+    for lib in libs
+        check_updates[f32](lib, 4)
 
-@test("rotg agrees with the platform BLAS on every sign and magnitude order")
+@test("rotg agrees with Accelerate and OpenBLAS on every sign and magnitude order")
 oracle_rotg()
-    check_rotg_cases[f64]()
-    check_rotg_cases[f32]()
+    for lib in libs
+        check_rotg_cases[f64](lib)
+        check_rotg_cases[f32](lib)
 
-@test("iamax breaks ties as the platform BLAS does, at every stride")
+@test("iamax breaks ties as Accelerate and OpenBLAS do, at every stride")
 oracle_iamax_ties()
-    check_iamax_ties[f64]()
-    check_iamax_ties[f32]()
+    for lib in libs
+        check_iamax_ties[f64](lib)
+        check_iamax_ties[f32](lib)
+
+@test("the two oracles are two libraries: OpenBLAS is loaded, and answers as Accelerate does")
+oracle_both_present()
+    assert(ob_distinct() == 1, "OpenBLAS's cblas_ddot is the linked one")
+    var xs = [1.0, -2.0, 3.0]
+    var ys = [4.0, 5.0, -6.0]
+    for lib in libs
+        assert(f64.o_dot(lib, 3, as_mut_ptr(xs[..]), 1, as_mut_ptr(ys[..]), 1) == -24.0, lib.name())

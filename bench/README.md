@@ -1,8 +1,10 @@
 # bench
 
-Times `dot` and `axpy` from `sh.sysl.blas` against the platform's CBLAS (Accelerate on macOS) at
-four sizes — L1-resident, L2-resident, and two in main memory — and prints GFLOPS (2n operations per
-call), each the best of seven trials of about 4e8 operations.
+Times every contiguous Level 1 routine of `sh.sysl.blas` against Accelerate and OpenBLAS at three
+sizes — L1-resident (1024 elements), L2-resident (262144) and main memory (4194304) — and prints GB/s
+of vector data each call reads and writes. Within a trial the three implementations run in turn, so
+a change in the machine's load lands on all three alike; each figure is the median of seven trials
+of about 1e8 elements.
 
 ```
 cd bench
@@ -10,31 +12,24 @@ sysl build . -o bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench
 ```
 
-## Apple M5 Pro, sysl 0.7.10, 2026-10-29
+OpenBLAS is loaded at run time from `$SYSL_OPENBLAS`, else Homebrew's
+`/opt/homebrew/opt/openblas/lib/libopenblas.dylib`, and pinned to one thread
+(`oracle/sh/sysl/cblas/openblas.c` says why it is not linked).
 
-Single-threaded Accelerate (`VECLIB_MAXIMUM_THREADS=1`; the figures were the same without it).
-**Measured under load** — load average 38–41, with a compiler release building on the same machine and
-this run niced — so treat the absolute figures as a floor and the ratios as indicative; re-run quiet.
+## Apple M5 Pro, sysl 0.8.0, OpenBLAS 0.3.34, 2026-10-29
 
-| type | n | dot sysl | dot Accelerate | % | axpy sysl | axpy Accelerate | % |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| f64 | 1024 | 15.77 | 23.36 | 68 | 14.84 | 39.96 | 37 |
-| f64 | 16384 | 13.67 | 77.06 | 18 | 9.76 | 45.47 | 21 |
-| f64 | 262144 | 11.96 | 88.37 | 14 | 9.21 | 44.88 | 21 |
-| f64 | 4194304 | 9.26 | 10.21 | 91 | 8.17 | 9.34 | 87 |
-| f32 | 1024 | 31.69 | 31.70 | 100 | 29.13 | 45.55 | 64 |
-| f32 | 16384 | 27.22 | 135.15 | 20 | 23.61 | 95.22 | 25 |
-| f32 | 262144 | 28.46 | 181.09 | 16 | 19.87 | 92.62 | 21 |
-| f32 | 4194304 | 19.96 | 21.74 | 92 | 17.26 | 19.60 | 88 |
+PENDING: the machine's load stayed far above 10 for the whole session, which makes wall-clock
+figures meaningless. The table goes here from the first quiet run.
 
-What the numbers say:
+## What the code says, independent of load
 
-- **In main memory the two are within 10%**: both are waiting on DRAM.
-- **On L2-resident data Accelerate is 5–7x faster**, beyond what one core's NEON pipes can issue
-  (88 GFLOPS of f64 `dot`). On M4 and later Accelerate runs these on the SME matrix unit, which
-  streams from L2; NEON code cannot match it. OpenBLAS (NEON) is the like-for-like baseline and is the
-  next column to add.
-- **In L1, f32 `dot` matches Accelerate; f64 `dot` is at 68% and `axpy` at 37–64%.** The kernel loop is
-  already vectorized and fused (four `ldp q` pairs into four `fmla`, four accumulators), but each step
-  also carries two bounds checks that the loop condition already guarantees. sysl 0.8.0's unchecked
-  access removes them; that is the first thing to re-measure.
+- **`dot`, `axpy`, `scal`, `copy`, `swap`, `rot`**: one step is 128 bytes — eight `ldp q` pairs into
+  eight independent `fmla.2d` (f64) or `fmla.4s` (f32) accumulators, the shape OpenBLAS's kernels
+  have. Two compare-and-branch pairs per step are the vector loads' run checks, which sysl's
+  `@unchecked` cannot remove (DESIGN.md, F1). OpenBLAS's `daxpy` steps 32 elements with software
+  prefetch and no checks.
+- **`asum`, `nrm2`, `iamax`**: scalar walks, one element per step and a dependent add chain, until a
+  vector has a lane-wise `abs` (DESIGN.md, F2).
+- **On M4 and later Accelerate uses the SME matrix unit**, which streams from L2 faster than one
+  core's NEON pipes can issue (its f64 `dot` reached 88 GFLOPS on L2-resident data in the 0.7.10
+  run); OpenBLAS is the like-for-like baseline.
