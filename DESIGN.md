@@ -14,7 +14,7 @@ faer (Rust) and Octavian.jl.
 | level | routines | state |
 |---|---|---|
 | 1 | axpy, dot, nrm2, asum, scal, copy, swap, iamax, rot, rotg | done, f32 and f64 |
-| 2 | gemv, ger | next |
+| 2 | gemv, ger | done, f32 and f64 |
 | 3 | gemm (packing, cache blocking, threads), then trsm | gemm: the blocked structure, f32 and f64, single-threaded, not yet tuned |
 
 Complex element types, `rotm`/`rotmg`, and the banded and packed Level 2 forms are not scheduled.
@@ -55,9 +55,16 @@ architecture's kernel is an optimization that must agree with it bit for bit on 
 order, or within a stated tolerance where it fuses differently.
 
 **Level 1 and Level 2 have no micro-kernel layer.** Their work is O(n) or O(n^2) on as much data, so
-they are memory-bound and a contiguous slice kernel over `<W>T` vectors (W = 64 bytes of lanes: four
-128-bit registers, so four independent accumulators) is the whole design. Each routine has the
+they are memory-bound and a contiguous slice kernel over `<W>T` vectors (W = 128 bytes of lanes:
+eight 128-bit registers, so eight independent accumulators) is the whole design. Each routine has the
 contiguous kernel and a scalar walk that follows arbitrary strides.
+
+Level 2 builds on the Level 1 kernels. `gemv` on a matrix with contiguous columns is column axpys,
+four columns per pass so `y` is loaded and stored once per four; on contiguous rows (a transpose) it
+is dot products, four rows per pass sharing each load of `x`, at 64 bytes of lanes per row so the four
+accumulators and `x` fit the register file. Both take the vector the matrix sweeps past a 16 KB panel
+at a time, so it stays in L1. `ger` is column axpys of `x`, or of `y` over `a.t()` when the rows are
+the contiguous side. A matrix with neither stride 1, or a vector off stride 1, takes a walk.
 
 ## Element types and tile sizes
 
@@ -65,7 +72,7 @@ contiguous kernel and a scalar walk that follows arbitrary strides.
 depend on the format — Blue's thresholds and scale factors for `nrm2`, the safe range for `rotg` —
 each an exact power of two written as a hex float literal. A routine is `axpy[T: Real](…)` and is
 monomorphized per width; the vector kernels are `[T: Real, const W: usize]` and receive
-`W = 64 / sizeof(T)` from the routine.
+`W = 128 / sizeof(T)` from the routine.
 
 **Complex** would be a second trait over `sysl.math.complex.Complex[F]` (conjugation, `|re| + |im|`
 for `iamax`, the complex `rotg`), with the real routines unchanged. Level 1 complex is not cheap — it
@@ -118,18 +125,24 @@ bug in the caller.
 
 **A matrix is a view with two strides**, `Matrix[T] { data, rows, cols, row_stride, col_stride }`
 and `MatrixMut[T]`, as BLIS has it: row-major, column-major and any general stride are the same type,
-and `a.t()` is a view that swaps the two strides rather than a `trans` flag. `col_major(data, rows,
-cols, ld)` is BLAS's layout (it traps on `ld < rows`), `matrix(…)` takes any two strides, and both
-check that the slice holds every element. `gemm` then needs no `transa`/`transb`/`lda` parameters;
-packing absorbs whatever strides it is given.
+and `a.t()` is a view that swaps the two strides rather than a `trans` flag. `matrix(data, rows, cols,
+ld)` is BLAS's column-major layout and traps when `ld < max(1, rows)` or the data is short; a
+hand-built view is checked by the routine before it reads. `gemm` therefore needs no
+`transa`/`transb`/`lda` parameters; packing absorbs whatever strides it is given.
 
 ```sysl
-val len = gemm_work_len[f64](m, n, k)          // GemmWorkLen { a, b }: elements per packing buffer
-gemm(alpha, a, b.t(), beta, c, GemmWork(pa, pb))   // the core: caller's buffers, @no_alloc
-gemm_alloc(alpha, a, b.t(), beta, c)           // sh.sysl.blas.heap: allocates them per call
+gemv(alpha, a, x, beta, y)        // y := alpha a x + beta y;  a.t() for trans = 'T'
+ger(alpha, x, y, a)               // a := alpha x yᵀ + a
+val len = gemm_work_len[f64](m, n, k)              // GemmWorkLen { a, b }: elements per packing buffer
+gemm(alpha, a, b.t(), beta, c, GemmWork(pa, pb))   // c := alpha a bᵀ + beta c, in the caller's buffers
+gemm_alloc(alpha, a, b.t(), beta, c)               // sh.sysl.blas.heap: allocates them per call
 ```
 
-`gemm` follows the reference where it is specific: `beta = 0` writes C without reading it (a NaN
+Level 2 keeps the reference's quick returns: an empty matrix leaves `y` alone whatever `beta` (so
+`beta` is not applied when there are no columns), `beta = 0` writes `y` without reading it, and
+`alpha = 0` reads neither the matrix nor `x`.
+
+`gemm` does the same where the reference is specific: `beta = 0` writes C without reading it (a NaN
 there does not survive), `alpha = 0` or `k = 0` reads neither A nor B and only scales C, and
 `beta = 1` with `alpha = 0` touches nothing. Shapes that disagree, and buffers shorter than
 `gemm_work_len` says, trap. The allocating form lives in its own module because `@no_alloc` in a
@@ -186,11 +199,19 @@ package's, not one this library starts per call.
   `Oracle` method takes a `Lib`, and every check runs against both; one test proves the two
   `cblas_ddot`s live in different images. OpenBLAS is the like-for-like speed baseline (NEON, no
   matrix unit), and on Linux the only oracle.
+- **Where the two disagree, the reference decides.** Accelerate's `cblas_?gemv` with `trans` and
+  `M = 0` scales `y` by `beta`; the reference and OpenBLAS return at once, as Accelerate itself does
+  for `N = 0` without `trans`. `sh.sysl.blas` follows the reference, the oracle check compares that
+  one case with `y`'s starting value, and a test pins Accelerate's behaviour so a change in it shows.
 - **netlib**: the reference test programs (`dblat1.f`, `sblat1.f`, `dblat2.f`, `dblat3.f`) carry
   hand-derived expected values for small fixed inputs, including every stride sign; porting their
-  tables gives a check that depends on no vendor. Level 1's netlib edges — `rotg`'s sign conventions,
-  `iamax`'s ties and NaNs, `nrm2`'s scaling — are already tested against the definitions and against
-  Accelerate.
+  tables gives a check that depends on no vendor. Level 1's tables are ported in `netlib_tests.sysl`
+  (dot, axpy, rotg, rot, copy, swap, nrm2, asum, scal, iamax, at both widths, with netlib's
+  `SFAC`-scaled comparison and the scaling stress test for `nrm2`); its header records the source URLs
+  and SHA-256s. They agree with the package everywhere except one documented choice: netlib's
+  `i?amax` returns the first NaN wherever it is, this package's `iamax` never prefers a NaN unless it
+  is element 0, so those cases are checked against the package's definition. Negative strides agree
+  too: netlib's two-vector routines and its `nrm2` test walk them backwards as the views do.
 
 Every test runs under ASan as well (`SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`).
 
@@ -198,7 +219,8 @@ Every test runs under ASan as well (`SYSL_EXTRA_CFLAGS="-fsanitize=address -g" s
 
 `bench/` times every contiguous Level 1 routine of sysl, Accelerate and OpenBLAS at sizes chosen to
 live in L1, in L2, and in main memory, and prints GB/s of vector data read and written (2mnk GFLOPS
-for gemm, when it exists). Within each trial the three run in turn, so a change in the machine's
+for gemm, when it exists); `gemv` and `ger` are reported in GFLOPS (2mn per call) on square
+column-major matrices of 48, 256 and 2048, whose f64 storage fits L1, fits L2, and does not. Within each trial the three run in turn, so a change in the machine's
 load lands on all three alike; each figure is the median of seven trials of about 1e8 elements.
 Runs are `caffeinate -dimsu` with `VECLIB_MAXIMUM_THREADS=1` (OpenBLAS is pinned to one thread when
 it is loaded), and record the chip and the load average beside the numbers.
@@ -246,12 +268,13 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 3. **Mismatched lengths**: trap (now), use the shorter, or return a `Result`?
 4. **`iamax`'s result**: `Option[usize]`, 0-based (now), or CBLAS's plain index with 0 for empty?
 5. **Level 3 workspace** — *decided*: caller-supplied packing buffers in the core (`GemmWork`, sized
-   by `gemm_work_len`; the package stays `@no_alloc`), plus `sh.sysl.blas.heap.gemm_alloc`.
+   by `gemm_work_len`; it stays `@no_alloc` and usable on a board), plus
+   `sh.sysl.blas.heap.gemm_alloc`.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads**: whose pool — `sysl.threads`, a package, or the caller's?
 8. **Vector `mul_add` and `abs`**: add them to `<N>T` before the micro-kernels are written?
 9. **The `@tests` impl rule**: allow an `impl` of a test-file trait for any type?
 10. **Tile sizes** — *decided*: fixed per target at compile time.
-11. **The speed target on Apple silicon** — *decided*: OpenBLAS's NEON path. Accelerate's SME is an
-    out-of-scope gap (it would need streaming-mode support in sysl).
+11. **The speed target on Apple silicon** — *decided*: OpenBLAS's NEON path. Accelerate's SME is out
+    of scope (it would need streaming-mode support in sysl) and is reported alongside, not chased.
 12. **The oracle on Linux**: `libcblas` is not a standard name there; link OpenBLAS directly?

@@ -99,3 +99,62 @@ impl[T] StridedMut[T]
 
     /** The same elements, read-only. */
     as_view(self) -> Strided[T] = Strided(self.data, self.len, self.inc)
+
+/** A read-only matrix: `rows` x `cols` elements of `data`, element `(i, j)` at
+ * `i * row_stride + j * col_stride`.
+ *
+ * Column-major storage with leading dimension `ld` is `row_stride = 1, col_stride = ld`, which is what
+ * `matrix` builds; row-major is the mirror, and `t()` turns one into the other. A routine therefore
+ * takes no transpose flag: `gemv(alpha, a.t(), x, beta, y)` is BLAS's `trans = 'T'`.
+ */
+struct Matrix[T]
+    data: []const T
+    rows: usize
+    cols: usize
+    row_stride: usize
+    col_stride: usize
+
+/** A matrix that the routine writes, with the same layout rules as `Matrix`. */
+struct MatrixMut[T]
+    data: []T
+    rows: usize
+    cols: usize
+    row_stride: usize
+    col_stride: usize
+
+/** True when every element of a `rows` x `cols` layout is inside `have` elements of storage. */
+private[blas] holds(have: usize, rows: usize, cols: usize, rs: usize, cs: usize) -> bool = rows == 0 || cols == 0 || (rows - 1) * rs + (cols - 1) * cs < have
+
+private column_major(have: usize, rows: usize, cols: usize, ld: usize)
+    assert(ld >= rows && ld >= 1, "the leading dimension is shorter than a column")
+    assert(holds(have, rows, cols, 1, ld), "a matrix reaches past the end of its data")
+
+/** The `rows` x `cols` column-major matrix whose columns start `ld` elements apart in `data`; traps
+ * if `ld` is less than `rows` (or zero), or if `data` is too short to hold the last column.
+ */
+matrix[T](data: []const T, rows: usize, cols: usize, ld: usize) -> Matrix[T]
+    column_major(data.len, rows, cols, ld)
+    Matrix(data, rows, cols, 1, ld)
+
+/** The writable form of `matrix`, with the same checks. */
+matrix_mut[T](data: []T, rows: usize, cols: usize, ld: usize) -> MatrixMut[T]
+    column_major(data.len, rows, cols, ld)
+    MatrixMut(data, rows, cols, 1, ld)
+
+impl[T] Matrix[T]
+    /** The transpose, as a view of the same storage. */
+    t(self) -> Matrix[T] = Matrix(self.data, self.cols, self.rows, self.col_stride, self.row_stride)
+
+    /** Element `(i, j)`. */
+    at(self, i: usize, j: usize) -> T = self.data[i * self.row_stride + j * self.col_stride]
+
+impl[T] MatrixMut[T]
+    t(self) -> MatrixMut[T] = MatrixMut(self.data, self.cols, self.rows, self.col_stride, self.row_stride)
+
+    at(self, i: usize, j: usize) -> T = self.data[i * self.row_stride + j * self.col_stride]
+
+    set(self, i: usize, j: usize, v: T)
+        self.data[i * self.row_stride + j * self.col_stride] = v
+
+    /** The same elements, read-only. */
+    as_view(self) -> Matrix[T] = Matrix(self.data, self.rows, self.cols, self.row_stride, self.col_stride)

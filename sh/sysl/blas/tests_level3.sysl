@@ -56,7 +56,7 @@ private check_def[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed
     val len = gemm_work_len[T](m, n, k)
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
-    gemm(alpha, col_major(a.view(), m, k, lda), col_major(b.view(), k, n, ldb), beta, col_major_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
+    gemm(alpha, matrix(a.view(), m, k, lda), matrix(b.view(), k, n, ldb), beta, matrix_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
     for j in 0..<n
         for i in 0..<m
             var s = T.zero()
@@ -143,7 +143,7 @@ gemm_alpha_zero_beta_one()
 gemm_empty_k()
     val c: Buf[f64] = buf_filled(6, 4.0)
     val none: Buf[f64] = buf_filled(0, 0.0)
-    gemm(2.0, col_major(none.view(), 3, 0, 3), col_major(none.view(), 0, 2, 1), 0.25, col_major_mut(c.view(), 3, 2, 3), GemmWork(none.view(), none.view()))
+    gemm(2.0, matrix(none.view(), 3, 0, 3), matrix(none.view(), 0, 2, 1), 0.25, matrix_mut(c.view(), 3, 2, 3), GemmWork(none.view(), none.view()))
     for i in 0..<6
         assert(c[i] == 1.0)
     val len = gemm_work_len[f64](3, 2, 0)
@@ -153,8 +153,8 @@ gemm_empty_k()
 gemm_empty_mn()
     val none: Buf[f64] = buf_filled(0, 0.0)
     val a: Buf[f64] = buf_filled(12, f64.nan())
-    gemm(1.0, col_major(none.view(), 0, 4, 1), col_major(a.view(), 4, 3, 4), 0.0, col_major_mut(none.view(), 0, 3, 1), GemmWork(none.view(), none.view()))
-    gemm(1.0, col_major(a.view(), 3, 4, 3), col_major(none.view(), 4, 0, 4), 0.0, col_major_mut(none.view(), 3, 0, 3), GemmWork(none.view(), none.view()))
+    gemm(1.0, matrix(none.view(), 0, 4, 1), matrix(a.view(), 4, 3, 4), 0.0, matrix_mut(none.view(), 0, 3, 1), GemmWork(none.view(), none.view()))
+    gemm(1.0, matrix(a.view(), 3, 4, 3), matrix(none.view(), 4, 0, 4), 0.0, matrix_mut(none.view(), 3, 0, 3), GemmWork(none.view(), none.view()))
     assert(gemm_work_len[f32](0, 5, 5).a == 0 && gemm_work_len[f32](5, 0, 5).b == 0)
 
 @test("a transpose is the same storage with the strides swapped")
@@ -170,19 +170,19 @@ gemm_transposes()
     var pb: [64]f64
     val w = GemmWork(pa[..], pb[..])
     // A * A^T four ways: [[14, 32], [32, 77]].
-    gemm(1.0, col_major(a[..], 2, 3, 2), col_major(a[..], 2, 3, 2).t(), 0.0, col_major_mut(c1[..], 2, 2, 2), w)
-    gemm(1.0, col_major(at[..], 3, 2, 3).t(), col_major(at[..], 3, 2, 3), 0.0, col_major_mut(c2[..], 2, 2, 2), w)
-    gemm(1.0, col_major(a[..], 2, 3, 2), col_major(at[..], 3, 2, 3), 0.0, col_major_mut(c3[..], 2, 2, 2), w)
-    gemm(1.0, col_major(at[..], 3, 2, 3).t(), col_major(a[..], 2, 3, 2).t(), 0.0, col_major_mut(c4[..], 2, 2, 2), w)
+    gemm(1.0, matrix(a[..], 2, 3, 2), matrix(a[..], 2, 3, 2).t(), 0.0, matrix_mut(c1[..], 2, 2, 2), w)
+    gemm(1.0, matrix(at[..], 3, 2, 3).t(), matrix(at[..], 3, 2, 3), 0.0, matrix_mut(c2[..], 2, 2, 2), w)
+    gemm(1.0, matrix(a[..], 2, 3, 2), matrix(at[..], 3, 2, 3), 0.0, matrix_mut(c3[..], 2, 2, 2), w)
+    gemm(1.0, matrix(at[..], 3, 2, 3).t(), matrix(a[..], 2, 3, 2).t(), 0.0, matrix_mut(c4[..], 2, 2, 2), w)
     val want: [4]f64 = [14, 32, 32, 77]
     assert(c1 == want && c2 == want && c3 == want && c4 == want)
     // A row-major C is the transpose of a column-major one.
     var cr: [4]f64
-    gemm(1.0, col_major(a[..], 2, 3, 2), col_major(at[..], 3, 2, 3), 0.0, matrix_mut(cr[..], 2, 2, 2, 1), w)
+    gemm(1.0, matrix(a[..], 2, 3, 2), matrix(at[..], 3, 2, 3), 0.0, matrix_mut(cr[..], 2, 2, 2).t(), w)
     assert(cr == want)
     // A^T * A is 3 x 3 and symmetric, so row-major and column-major C agree.
     var c6: [9]f64
-    gemm(1.0, col_major(at[..], 3, 2, 3), col_major(a[..], 2, 3, 2), 0.0, matrix_mut(c6[..], 3, 3, 3, 1), w)
+    gemm(1.0, matrix(at[..], 3, 2, 3), matrix(a[..], 2, 3, 2), 0.0, matrix_mut(c6[..], 3, 3, 3).t(), w)
     val want6: [9]f64 = [17, 22, 27, 22, 29, 36, 27, 36, 45]
     assert(c6 == want6)
 
@@ -191,7 +191,7 @@ gemm_shape_mismatch()
     var c: [4]f64
     var w: [64]f64
     val a: [6]f64 = [1, 2, 3, 4, 5, 6]
-    gemm(1.0, col_major(a[..], 2, 3, 2), col_major(a[..], 2, 3, 2), 0.0, col_major_mut(c[..], 2, 2, 2), GemmWork(w[..], w[..]))
+    gemm(1.0, matrix(a[..], 2, 3, 2), matrix(a[..], 2, 3, 2), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(w[..], w[..]))
 
 @test("gemm traps on packing buffers shorter than gemm_work_len says", should_trap)
 gemm_short_work()
@@ -199,31 +199,25 @@ gemm_short_work()
     var pa: [3]f64
     var pb: [64]f64
     val a: [6]f64 = [1, 2, 3, 4, 5, 6]
-    gemm(1.0, col_major(a[..], 2, 3, 2), col_major(a[..], 3, 2, 3), 0.0, col_major_mut(c[..], 2, 2, 2), GemmWork(pa[..], pb[..]))
-
-@test("a column-major view whose leading dimension is under its rows traps", should_trap)
-gemm_short_ld()
-    val a: [6]f64 = [1, 2, 3, 4, 5, 6]
-    val m = col_major(a[..], 3, 2, 2)
-    assert(m.rows == 3)
+    gemm(1.0, matrix(a[..], 2, 3, 2), matrix(a[..], 3, 2, 3), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa[..], pb[..]))
 
 @test("a hand-built matrix view past its data traps before gemm reads it", should_trap)
 gemm_hand_built_past_end()
     var c: [4]f64
     var w: [64]f64
     val a: [6]f64 = [1, 2, 3, 4, 5, 6]
-    gemm(1.0, Matrix(a[..], 2, 4, 1, 2), col_major(a[..], 4, 2, 4), 0.0, col_major_mut(c[..], 2, 2, 2), GemmWork(w[..], w[..]))
+    gemm(1.0, Matrix(a[..], 2, 4, 1, 2), matrix(a[..], 4, 2, 4), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(w[..], w[..]))
 
 @test("a hand-built C past its data traps before gemm writes it, even with alpha zero", should_trap)
 gemm_hand_built_c_past_end()
     var c: [4]f64
     var w: [64]f64
     val a: [6]f64 = [1, 2, 3, 4, 5, 6]
-    gemm(0.0, col_major(a[..], 2, 3, 2), col_major(a[..], 3, 2, 3), 0.0, MatrixMut(c[..], 2, 3, 1, 2), GemmWork(w[..], w[..]))
+    gemm(0.0, matrix(a[..], 2, 3, 2), matrix(a[..], 3, 2, 3), 0.0, MatrixMut(c[..], 2, 3, 1, 2), GemmWork(w[..], w[..]))
 
 /** gemm over contiguous column-major buffers, with buffers sized by gemm_work_len. */
 private gemm_into(alpha: f64, a: Buf[f64], b: Buf[f64], beta: f64, c: Buf[f64], m: usize, n: usize, k: usize)
     val len = gemm_work_len[f64](m, n, k)
     val pa: Buf[f64] = buf_filled(len.a, 0.0)
     val pb: Buf[f64] = buf_filled(len.b, 0.0)
-    gemm(alpha, col_major(a.view(), m, k, m), col_major(b.view(), k, n, k), beta, col_major_mut(c.view(), m, n, m), GemmWork(pa.view(), pb.view()))
+    gemm(alpha, matrix(a.view(), m, k, m), matrix(b.view(), k, n, k), beta, matrix_mut(c.view(), m, n, m), GemmWork(pa.view(), pb.view()))

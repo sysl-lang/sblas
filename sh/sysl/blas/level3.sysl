@@ -226,11 +226,11 @@ private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, 
  */
 gemm[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
     assert(a.rows == c.rows && b.cols == c.cols && a.cols == b.rows, "gemm's matrices do not agree in shape")
-    assert(spans(c.data.len, c.rows, c.cols, c.row_stride, c.col_stride), "a matrix view reaches past the end of its data")
+    assert(holds(c.data.len, c.rows, c.cols, c.row_stride, c.col_stride), "a matrix reaches past the end of its data")
     if c.rows == 0 || c.cols == 0 then return
     if alpha == T.zero() || a.cols == 0
         scale_c(c, beta)
         return
-    assert(spans(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix view reaches past the end of its data")
-    assert(spans(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix view reaches past the end of its data")
+    assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
+    assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
     gemm_blocked[T, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](alpha, a, b, beta, c, work)

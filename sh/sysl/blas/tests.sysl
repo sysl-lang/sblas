@@ -264,3 +264,330 @@ rotg_range()
     assert(close(h.r, 5e-310, 1e5) && close(h.s, 0.8, 1e5))
     val f = rotg(3e30f32, -4e30f32)
     assert(close(f.r, -5e30f32, 2) && close(f.c, -0.6f32, 2))
+
+// --- Matrices -------------------------------------------------------------------------------------
+//
+// The matrix in most of these is [[1, 2, 3], [4, 5, 6]], column-major with a leading dimension of 3,
+// so every column carries one element of padding; the padding is NaN, and any read of it would show.
+
+@test("matrix and t() place element (i, j) as column-major storage and its transpose")
+matrix_layout()
+    val xs: [9]f64 = [1, 4, 0, 2, 5, 0, 3, 6, 0]
+    val a = matrix(xs[..], 2, 3, 3)
+    assert(a.at(0, 0) == 1 && a.at(1, 0) == 4 && a.at(0, 2) == 3 && a.at(1, 2) == 6)
+    val t = a.t()
+    assert(t.rows == 3 && t.cols == 2 && t.at(2, 1) == 6 && t.at(1, 0) == 2)
+
+@test("a leading dimension shorter than a column traps", should_trap)
+matrix_short_ld()
+    val xs: [9]f64 = [1, 4, 0, 2, 5, 0, 3, 6, 0]
+    print(matrix(xs[..], 3, 3, 2).rows)
+
+@test("a leading dimension of zero traps, even for an empty matrix", should_trap)
+matrix_zero_ld()
+    val xs: [1]f64 = [1]
+    print(matrix(xs[..], 0, 3, 0).rows)
+
+@test("a matrix that reaches past its data traps", should_trap)
+matrix_past_the_end()
+    var xs: [8]f64 = [1, 4, 0, 2, 5, 0, 3, 6]
+    print(matrix_mut(xs[..], 3, 3, 3).rows)
+
+@test("a matrix whose last column ends at the end of its data is accepted, as is an empty one")
+matrix_exact_fit()
+    val xs: [8]f64 = [1, 4, 0, 2, 5, 0, 3, 6]
+    assert(matrix(xs[..], 2, 3, 3).at(1, 2) == 6 && matrix(xs[0..<0], 0, 5, 1).cols == 5)
+
+// --- gemv -----------------------------------------------------------------------------------------
+
+@test("the README's matrix example, continuing from its vector one")
+readme_matrix_example()
+    var xs: [4]f64 = [1, 2, 3, 4]
+    var ys: [4]f64 = [3, 5, 7, 9]
+    val m: [6]f64 = [1, 4, 2, 5, 3, 6]
+    var b: [6]f64
+    val a = matrix(m[..], 2, 3, 2)
+    gemv(1.0, a, view(xs[0..<3]), 0.0, view_mut(ys[0..<2]))
+    assert(ys == [14.0, 32, 7, 9])
+    gemv(1.0, a.t(), view(ys[0..<2]), 1.0, view_mut(xs[0..<3]))
+    assert(xs == [143.0, 190, 237, 4])
+    ger(2.0, view(ys[0..<2]), view(xs[0..<3]), matrix_mut(b[..], 2, 3, 2))
+    assert(b == [4004.0, 9152, 5320, 12160, 6636, 15168])
+
+@test("gemv computes alpha * a * x + beta * y and, through t(), its transpose")
+gemv_small()
+    val nan = f64.nan()
+    val ad: [9]f64 = [1, 4, nan, 2, 5, nan, 3, 6, nan]
+    val a = matrix(ad[..], 2, 3, 3)
+    val x: [3]f64 = [1, 1, 2]
+    var y: [2]f64 = [10, 20]
+    gemv(2.0, a, view(x[..]), 3.0, view_mut(y[..]))
+    assert(y == [48.0, 102])
+    val u: [2]f64 = [1, -1]
+    var v: [3]f64 = [1, 2, 3]
+    gemv(1.0, a.t(), view(u[..]), -1.0, view_mut(v[..]))
+    assert(v == [-4.0, -5, -6])
+    val nf = f32.nan()
+    val af: [9]f32 = [1, 4, nf, 2, 5, nf, 3, 6, nf]
+    val xf: [3]f32 = [1, 1, 2]
+    var yf: [2]f32 = [10, 20]
+    gemv(2, matrix(af[..], 2, 3, 3), view(xf[..]), 3, view_mut(yf[..]))
+    assert(yf == [48.0f32, 102])
+    val uf: [2]f32 = [1, -1]
+    var vf: [3]f32 = [1, 2, 3]
+    gemv(1, matrix(af[..], 2, 3, 3).t(), view(uf[..]), -1, view_mut(vf[..]))
+    assert(vf == [-4.0f32, -5, -6])
+
+@test("gemv with beta zero sets y without reading it, on every path")
+gemv_beta_zero()
+    val nan = f64.nan()
+    val ad: [9]f64 = [1, 4, nan, 2, 5, nan, 3, 6, nan]
+    val a = matrix(ad[..], 2, 3, 3)
+    val x: [3]f64 = [1, 1, 2]
+    var y: [2]f64 = [nan, nan]
+    gemv(1.0, a, view(x[..]), 0.0, view_mut(y[..]))
+    assert(y == [9.0, 21])
+    var v: [3]f64 = [nan, nan, nan]
+    gemv(1.0, a.t(), strided(x[0..<2], 2, 1), 0.0, view_mut(v[..]))
+    assert(v == [5.0, 7, 9])
+    var w: [3]f64 = [nan, 7, nan]
+    gemv(1.0, a, strided(x[..], 3, -1), 0.0, strided_mut(w[..], 2, -2))
+    assert(w == [19.0, 7, 7])
+
+@test("gemv with alpha zero only scales y, and reads neither a nor x")
+gemv_alpha_zero()
+    val nan = f64.nan()
+    val ad: [6]f64 = [nan, nan, nan, nan, nan, nan]
+    val x: [3]f64 = [nan, nan, nan]
+    var y: [2]f64 = [1, -2]
+    gemv(0.0, matrix(ad[..], 2, 3, 2), view(x[..]), 3.0, view_mut(y[..]))
+    assert(y == [3.0, -6])
+    gemv(0.0, matrix(ad[..], 2, 3, 2), view(x[..]), 0.0, view_mut(y[..]))
+    assert(y == [0.0, 0])
+    var z: [2]f64 = [nan, 4]
+    gemv(0.0, matrix(ad[..], 2, 3, 2), view(x[..]), 1.0, view_mut(z[..]))
+    assert(z[0].is_nan() && z[1] == 4)
+
+@test("gemv of a matrix with no rows or no columns leaves y as it is, whatever beta")
+gemv_empty()
+    val nan = f64.nan()
+    val ad: [1]f64 = [nan]
+    val x: [3]f64 = [1, 2, 3]
+    var y: [2]f64 = [nan, 5]
+    gemv(1.0, matrix(ad[0..<0], 2, 0, 2), strided(x[..], 0, 1), 0.0, view_mut(y[..]))
+    assert(y[0].is_nan() && y[1] == 5)
+    gemv(1.0, matrix(ad[0..<0], 0, 3, 1), view(x[..]), 0.0, strided_mut(y[..], 0, -1))
+    assert(y[0].is_nan() && y[1] == 5)
+    gemv(1.0, matrix(ad[0..<0], 0, 0, 1), strided(x[..], 0, 1), 2.0, strided_mut(y[..], 0, 1))
+    assert(y[0].is_nan() && y[1] == 5)
+
+@test("gemv honours negative and non-unit strides on x and y, and writes nothing between")
+gemv_strides()
+    val nan = f64.nan()
+    val ad: [9]f64 = [1, 4, nan, 2, 5, nan, 3, 6, nan]
+    val a = matrix(ad[..], 2, 3, 3)
+    val xs: [5]f64 = [2, nan, 1, nan, 1]
+    var ys: [2]f64 = [20, 10]
+    gemv(2.0, a, strided(xs[..], 3, -2), 3.0, strided_mut(ys[..], 2, -1))
+    assert(ys == [102.0, 48])
+    var zs: [3]f64 = [10, -7, 20]
+    gemv(2.0, a, strided(xs[..], 3, -2), 3.0, strided_mut(zs[..], 2, 2))
+    assert(zs == [48.0, -7, 102])
+    val us: [3]f64 = [-1, 0, 1]
+    var vs: [5]f64 = [3, -7, 2, -7, 1]
+    gemv(1.0, a.t(), strided(us[..], 2, -2), -1.0, strided_mut(vs[..], 3, -2))
+    assert(vs == [-6.0, -7, -5, -7, -4])
+    var ws: [3]f64 = [1, 2, 3]
+    gemv(1.0, a.t(), strided(us[..], 2, -2), -1.0, view_mut(ws[..]))
+    assert(ws == [-4.0, -5, -6])
+
+@test("gemv walks a matrix whose rows and columns are both strided, and its transpose")
+gemv_general_strides()
+    val nan = f64.nan()
+    // Rows 0 and 2 of a 4 x 3 column-major matrix: [[1, 2, 3], [4, 5, 6]] again.
+    val ad: [12]f64 = [1, nan, 4, nan, 2, nan, 5, nan, 3, nan, 6, nan]
+    val a = Matrix(ad[..], 2, 3, 2, 4)
+    val x: [3]f64 = [1, 1, 2]
+    var y: [2]f64 = [10, 20]
+    gemv(2.0, a, view(x[..]), 3.0, view_mut(y[..]))
+    assert(y == [48.0, 102])
+    val u: [2]f64 = [1, -1]
+    var v: [3]f64 = [1, 2, 3]
+    gemv(1.0, a.t(), view(u[..]), -1.0, view_mut(v[..]))
+    assert(v == [-4.0, -5, -6])
+
+private const tall64: usize = 2100
+
+private const tall32: usize = 4100
+
+@test("gemv over more rows than one panel, and its transpose over more columns, f64")
+gemv_panels_f64()
+    var ad: [tall64 * 5]f64
+    for j in 0..<5
+        for i in 0..<tall64
+            ad[j * tall64 + i] = f64(i % 7 + j)
+    val a = matrix(ad[..], tall64, 5, tall64)
+    val x: [5]f64 = [1, 2, 3, 4, 5]
+    var y: [tall64]f64
+    gemv(2.0, a, view(x[..]), 0.0, view_mut(y[..]))
+    for i in 0..<tall64
+        assert(y[i] == f64(2 * (15 * (i % 7) + 40)))
+    // x varies along the whole length, so a panel that read the wrong part of it would show.
+    var u: [tall64]f64
+    for i in 0..<tall64
+        u[i] = f64(i % 3)
+    var t: [5]f64 = [1, 1, 1, 1, 1]
+    gemv(2.0, a.t(), view(u[..]), 1.0, view_mut(t[..]))
+    for j in 0..<5
+        var want = 0
+        for i in 0..<tall64
+            want += (i % 7 + j) * (i % 3)
+        assert(t[j] == f64(2 * want + 1))
+
+@test("gemv over more rows than one panel, and its transpose over more columns, f32")
+gemv_panels_f32()
+    var ad: [tall32 * 5]f32
+    for j in 0..<5
+        for i in 0..<tall32
+            ad[j * tall32 + i] = f32(i % 7 + j)
+    val a = matrix(ad[..], tall32, 5, tall32)
+    val x: [5]f32 = [1, 2, 3, 4, 5]
+    var y: [tall32]f32
+    gemv(2, a, view(x[..]), 0, view_mut(y[..]))
+    for i in 0..<tall32
+        assert(y[i] == f32(2 * (15 * (i % 7) + 40)))
+    var u: [tall32]f32
+    for i in 0..<tall32
+        u[i] = f32(i % 3)
+    var t: [5]f32
+    gemv(2, a.t(), view(u[..]), 0, view_mut(t[..]))
+    for j in 0..<5
+        var want = 0
+        for i in 0..<tall32
+            want += (i % 7 + j) * (i % 3)
+        assert(t[j] == f32(2 * want))
+
+@test("gemv with x shorter than a's columns traps", should_trap)
+gemv_x_mismatch()
+    val ad: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [2]f64 = [1, 1]
+    var y: [2]f64
+    gemv(1.0, matrix(ad[..], 2, 3, 2), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("gemv with y longer than a's rows traps", should_trap)
+gemv_y_mismatch()
+    val ad: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [3]f64 = [1, 1, 1]
+    var y: [3]f64
+    gemv(1.0, matrix(ad[..], 2, 3, 2), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("a hand-built matrix past its data traps before gemv's walk reads it", should_trap)
+gemv_matrix_past_the_end()
+    val ad: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [3]f64 = [1, 1, 1]
+    var y: [2]f64
+    gemv(1.0, Matrix(ad[..], 2, 3, 2, 3), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("a hand-built column-major matrix past its data traps in gemv", should_trap)
+gemv_cols_past_the_end()
+    val ad: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [3]f64 = [1, 1, 1]
+    var y: [2]f64
+    gemv(1.0, Matrix(ad[..], 2, 3, 1, 3), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("a hand-built x past its data traps before gemv writes y", should_trap)
+gemv_x_past_the_end()
+    val ad: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [3]f64 = [1, 1, 1]
+    var y: [2]f64
+    gemv(1.0, matrix(ad[..], 2, 3, 2), Strided(x[..], 3, 2), 0.0, view_mut(y[..]))
+
+// --- ger ------------------------------------------------------------------------------------------
+
+@test("ger adds alpha * x * yᵀ, the same through t() with x and y exchanged, and leaves the padding")
+ger_small()
+    val nan = f64.nan()
+    var ad: [9]f64 = [1, 4, nan, 2, 5, nan, 3, 6, nan]
+    val x: [2]f64 = [1, 2]
+    val y: [3]f64 = [1, 0, -1]
+    ger(2.0, view(x[..]), view(y[..]), matrix_mut(ad[..], 2, 3, 3))
+    assert(ad[0] == 3 && ad[1] == 8 && ad[3] == 2 && ad[4] == 5 && ad[6] == 1 && ad[7] == 2)
+    assert(ad[2].is_nan() && ad[5].is_nan() && ad[8].is_nan())
+    ger(-2.0, view(y[..]), view(x[..]), matrix_mut(ad[..], 2, 3, 3).t())
+    assert(ad[0] == 1 && ad[1] == 4 && ad[3] == 2 && ad[4] == 5 && ad[6] == 3 && ad[7] == 6)
+    assert(ad[2].is_nan() && ad[5].is_nan() && ad[8].is_nan())
+    var af: [6]f32 = [1, 4, 2, 5, 3, 6]
+    val xf: [2]f32 = [1, 2]
+    val yf: [3]f32 = [1, 0, -1]
+    ger(2, view(xf[..]), view(yf[..]), matrix_mut(af[..], 2, 3, 2))
+    assert(af == [3.0f32, 8, 2, 5, 1, 2])
+    ger(-2, view(yf[..]), view(xf[..]), matrix_mut(af[..], 2, 3, 2).t())
+    assert(af == [1.0f32, 4, 2, 5, 3, 6])
+
+@test("ger with alpha zero reads nothing, so a NaN in x or y does not reach a")
+ger_alpha_zero()
+    val nan = f64.nan()
+    var ad: [4]f64 = [1, 2, 3, 4]
+    val x: [2]f64 = [nan, 1]
+    val y: [2]f64 = [1, nan]
+    ger(0.0, view(x[..]), view(y[..]), matrix_mut(ad[..], 2, 2, 2))
+    ger(0.0, strided(x[..], 2, -1), strided(y[..], 2, 1), MatrixMut(ad[..], 2, 2, 2, 1))
+    assert(ad == [1.0, 2, 3, 4])
+
+@test("ger of a matrix with no rows or no columns writes nothing")
+ger_empty()
+    var ad: [2]f64 = [1, 2]
+    val x: [2]f64 = [1, 2]
+    ger(1.0, strided(x[..], 0, 1), view(x[..]), matrix_mut(ad[0..<0], 0, 2, 1))
+    ger(1.0, view(x[..]), strided(x[..], 0, -1), matrix_mut(ad[0..<0], 2, 0, 2))
+    assert(ad == [1.0, 2])
+
+@test("ger honours negative and non-unit strides on x and y, and general matrix strides")
+ger_strides()
+    val nan = f64.nan()
+    // y = [1, 0, -1] stored backwards with stride 2; x = [1, 2] stored backwards.
+    val xs: [2]f64 = [2, 1]
+    val ys: [5]f64 = [-1, nan, 0, nan, 1]
+    var ad: [9]f64 = [1, 4, nan, 2, 5, nan, 3, 6, nan]
+    ger(2.0, strided(xs[..], 2, -1), strided(ys[..], 3, -2), matrix_mut(ad[..], 2, 3, 3))
+    assert(ad[0] == 3 && ad[1] == 8 && ad[3] == 2 && ad[4] == 5 && ad[6] == 1 && ad[7] == 2)
+    assert(ad[2].is_nan() && ad[5].is_nan() && ad[8].is_nan())
+    // Rows 0 and 2 of a 4 x 3 matrix, then the same through its transpose.
+    var gd: [12]f64 = [1, nan, 4, nan, 2, nan, 5, nan, 3, nan, 6, nan]
+    ger(2.0, strided(xs[..], 2, -1), strided(ys[..], 3, -2), MatrixMut(gd[..], 2, 3, 2, 4))
+    assert(gd[0] == 3 && gd[2] == 8 && gd[4] == 2 && gd[6] == 5 && gd[8] == 1 && gd[10] == 2)
+    ger(-2.0, strided(ys[..], 3, -2), strided(xs[..], 2, -1), MatrixMut(gd[..], 2, 3, 2, 4).t())
+    assert(gd[0] == 1 && gd[2] == 4 && gd[4] == 2 && gd[6] == 5 && gd[8] == 3 && gd[10] == 6)
+    for k in [1, 3, 5, 7, 9, 11]
+        assert(gd[k].is_nan())
+
+@test("ger over more rows than one panel, and through t() over more columns")
+ger_panels()
+    var ad: [tall32 * 5]f32
+    for k in 0..<tall32 * 5
+        ad[k] = 0
+    var x: [tall32]f32
+    for i in 0..<tall32
+        x[i] = f32(i % 7)
+    val y: [5]f32 = [1, 2, 3, 4, 5]
+    ger(1, view(x[..]), view(y[..]), matrix_mut(ad[..], tall32, 5, tall32))
+    for j in 0..<5
+        for i in 0..<tall32
+            assert(ad[j * tall32 + i] == f32((i % 7) * (j + 1)))
+    ger(-1, view(y[..]), view(x[..]), matrix_mut(ad[..], tall32, 5, tall32).t())
+    for k in 0..<tall32 * 5
+        assert(ad[k] == 0)
+
+@test("ger with y longer than a's columns traps", should_trap)
+ger_mismatch()
+    var ad: [6]f64
+    val x: [2]f64 = [1, 1]
+    val y: [4]f64 = [1, 1, 1, 1]
+    ger(1.0, view(x[..]), view(y[..]), matrix_mut(ad[..], 2, 3, 2))
+
+@test("a hand-built matrix past its data traps before ger writes it", should_trap)
+ger_matrix_past_the_end()
+    var ad: [6]f64
+    val x: [2]f64 = [1, 1]
+    val y: [3]f64 = [1, 1, 1]
+    ger(1.0, view(x[..]), view(y[..]), MatrixMut(ad[..], 2, 3, 2, 3))

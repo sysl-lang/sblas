@@ -153,6 +153,36 @@ void sysl_ob_srotg(float *a, float *b, float *c, float *s) {
     fn(a, b, c, s);
 }
 
+/* Level 2. CBLAS's `order` and `trans` are enums, passed as the ints they are. */
+typedef void (*gemv_d)(int, int, int, int, double, const double *, int, const double *, int, double, double *, int);
+typedef void (*gemv_s)(int, int, int, int, float, const float *, int, const float *, int, float, float *, int);
+typedef void (*ger_d)(int, int, int, double, const double *, int, const double *, int, double *, int);
+typedef void (*ger_s)(int, int, int, float, const float *, int, const float *, int, float *, int);
+
+void sysl_ob_dgemv(int order, int trans, int m, int n, double alpha, const double *a, int lda, const double *x, int incx,
+                   double beta, double *y, int incy) {
+    RESOLVE(gemv_d, "cblas_dgemv");
+    fn(order, trans, m, n, alpha, a, lda, x, incx, beta, y, incy);
+}
+
+void sysl_ob_sgemv(int order, int trans, int m, int n, float alpha, const float *a, int lda, const float *x, int incx,
+                   float beta, float *y, int incy) {
+    RESOLVE(gemv_s, "cblas_sgemv");
+    fn(order, trans, m, n, alpha, a, lda, x, incx, beta, y, incy);
+}
+
+void sysl_ob_dger(int order, int m, int n, double alpha, const double *x, int incx, const double *y, int incy, double *a,
+                  int lda) {
+    RESOLVE(ger_d, "cblas_dger");
+    fn(order, m, n, alpha, x, incx, y, incy, a, lda);
+}
+
+void sysl_ob_sger(int order, int m, int n, float alpha, const float *x, int incx, const float *y, int incy, float *a,
+                  int lda) {
+    RESOLVE(ger_s, "cblas_sger");
+    fn(order, m, n, alpha, x, incx, y, incy, a, lda);
+}
+
 /* 1 when the `cblas_ddot` this file reaches lives in a different image from the one the link bound,
  * which is the whole point of the arrangement and the one thing a mistake in it would quietly undo.
  */

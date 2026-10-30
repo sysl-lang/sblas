@@ -1,0 +1,253 @@
+module sh.sysl.blas
+@no_alloc
+
+// Level 2: matrix-vector routines, O(mn) work on O(mn) data, so memory-bound like Level 1.
+//
+// A routine has a contiguous path for each of the two ways a matrix can lie in storage, and a walk
+// for everything else. When a column of the matrix is contiguous (`row_stride == 1`, column-major),
+// `gemv` is a run of axpys of whole columns into `y`, four columns per pass so that `y` is loaded and
+// stored once for every four columns; when a row is contiguous (`col_stride == 1`, so a transposed
+// column-major matrix), it is a dot product of each row with `x`, four rows per pass so that each step
+// of `x` is loaded once for four rows. Both are blocked: the vector the matrix is swept past is taken a
+// panel at a time, small enough to stay in L1 while every column (or row) of the matrix streams by.
+// `ger` is a column axpy either way, run over the transpose when the rows are the contiguous side.
+//
+// The contiguous paths also need the vector they run along to be contiguous (stride 1); a matrix of
+// general strides, or a vector of any other stride, takes the walk, which follows every stride and
+// reads and writes `@unchecked` after checking once that the matrix and both vectors are inside
+// their storage.
+//
+// As in the reference BLAS, an empty matrix returns at once (so `beta` is not applied to `y` when the
+// matrix has no columns), `beta == 0` sets `y` to zero without reading it, and `alpha == 0` reads
+// neither the matrix nor `x`.
+
+/** Bytes of the vector a blocked path keeps in L1 while the matrix streams past it. */
+private const panel_bytes: usize = 16384
+
+/** Bytes per step of each of the four row accumulators in the dot path: four 128-bit registers each,
+ * so the four accumulators and a step of `x` fit the register file together.
+ */
+private const dot4_bytes: usize = 64
+
+private fits(have: usize, rows: usize, cols: usize, rs: usize, cs: usize)
+    assert(holds(have, rows, cols, rs, cs), "a matrix reaches past the end of its data")
+
+private dim(want: usize, len: usize)
+    assert(want == len, "a vector's length is not the matrix's matching dimension")
+
+// --- Contiguous kernels ---------------------------------------------------------------------------
+
+/** `y := c0 * s0 + c1 * s1 + c2 * s2 + c3 * s3 + y`, added in that order. */
+private cols4_kernel[T: Real, const W: usize](c0: []const T, c1: []const T, c2: []const T, c3: []const T, s0: T, s1: T, s2: T, s3: T, y: []T)
+    var i: usize = 0
+    while i + W <= y.len
+        var acc: <W>T = y.load(i)
+        val a0: <W>T = c0.load(i)
+        acc = a0 * s0 + acc
+        val a1: <W>T = c1.load(i)
+        acc = a1 * s1 + acc
+        val a2: <W>T = c2.load(i)
+        acc = a2 * s2 + acc
+        val a3: <W>T = c3.load(i)
+        acc = a3 * s3 + acc
+        y.store(i, acc)
+        i += W
+    while i < y.len
+        var v = y[i]
+        v = c0[i] * s0 + v
+        v = c1[i] * s1 + v
+        v = c2[i] * s2 + v
+        v = c3[i] * s3 + v
+        y[i] = v
+        i += 1
+
+/** The dot products of four rows with `x`, sharing each load of `x`. */
+private dot4_kernel[T: Real, const V: usize](r0: []const T, r1: []const T, r2: []const T, r3: []const T, x: []const T) -> (T, T, T, T)
+    var s0: <V>T = T.zero()
+    var s1: <V>T = T.zero()
+    var s2: <V>T = T.zero()
+    var s3: <V>T = T.zero()
+    var i: usize = 0
+    while i + V <= x.len
+        val xv: <V>T = x.load(i)
+        val a0: <V>T = r0.load(i)
+        s0 = a0 * xv + s0
+        val a1: <V>T = r1.load(i)
+        s1 = a1 * xv + s1
+        val a2: <V>T = r2.load(i)
+        s2 = a2 * xv + s2
+        val a3: <V>T = r3.load(i)
+        s3 = a3 * xv + s3
+        i += V
+    var t0 = s0.sum()
+    var t1 = s1.sum()
+    var t2 = s2.sum()
+    var t3 = s3.sum()
+    while i < x.len
+        val xi = x[i]
+        t0 = r0[i] * xi + t0
+        t1 = r1[i] * xi + t1
+        t2 = r2[i] * xi + t2
+        t3 = r3[i] * xi + t3
+        i += 1
+    (t0, t1, t2, t3)
+
+/** `y += alpha * a * x` for a matrix whose columns are contiguous, into a contiguous `y`. */
+private gemv_cols[T: Real](alpha: T, a: Matrix[T], x: Strided[T], y: []T)
+    val ld = a.col_stride
+    val p = panel_bytes / sizeof(T)
+    var i0: usize = 0
+    while i0 < a.rows
+        val h = if a.rows - i0 > p then p else a.rows - i0
+        val yp = y[i0..<i0 + h]
+        var j: usize = 0
+        while j + 4 <= a.cols
+            val b = j * ld + i0
+            cols4_kernel[T, block_bytes / sizeof(T)](a.data[b..<b + h], a.data[b + ld..<b + ld + h], a.data[b + 2 * ld..<b + 2 * ld + h], a.data[b + 3 * ld..<b + 3 * ld + h], alpha * x.at(j), alpha * x.at(j + 1), alpha * x.at(j + 2), alpha * x.at(j + 3), yp)
+            j += 4
+        while j < a.cols
+            val b = j * ld + i0
+            axpy_kernel[T, block_bytes / sizeof(T)](alpha * x.at(j), a.data[b..<b + h], yp)
+            j += 1
+        i0 += h
+
+/** `y += alpha * a * x` for a matrix whose rows are contiguous, from a contiguous `x`. */
+private gemv_rows[T: Real](alpha: T, a: Matrix[T], x: []const T, y: StridedMut[T])
+    val ld = a.row_stride
+    val p = panel_bytes / sizeof(T)
+    var j0: usize = 0
+    while j0 < a.cols
+        val w = if a.cols - j0 > p then p else a.cols - j0
+        val xp = x[j0..<j0 + w]
+        var i: usize = 0
+        while i + 4 <= a.rows
+            val b = i * ld + j0
+            val (d0, d1, d2, d3) = dot4_kernel[T, dot4_bytes / sizeof(T)](a.data[b..<b + w], a.data[b + ld..<b + ld + w], a.data[b + 2 * ld..<b + 2 * ld + w], a.data[b + 3 * ld..<b + 3 * ld + w], xp)
+            y.set(i, d0 * alpha + y.at(i))
+            y.set(i + 1, d1 * alpha + y.at(i + 1))
+            y.set(i + 2, d2 * alpha + y.at(i + 2))
+            y.set(i + 3, d3 * alpha + y.at(i + 3))
+            i += 4
+        while i < a.rows
+            val b = i * ld + j0
+            y.set(i, dot_kernel[T, block_bytes / sizeof(T)](a.data[b..<b + w], xp) * alpha + y.at(i))
+            i += 1
+        j0 += w
+
+/** `a += alpha * x * yᵀ` for a matrix whose columns are contiguous, from a contiguous `x`. */
+private ger_cols[T: Real](alpha: T, x: []const T, y: Strided[T], a: MatrixMut[T])
+    val ld = a.col_stride
+    val p = panel_bytes / sizeof(T)
+    var i0: usize = 0
+    while i0 < a.rows
+        val h = if a.rows - i0 > p then p else a.rows - i0
+        val xp = x[i0..<i0 + h]
+        for j in 0..<a.cols
+            val b = j * ld + i0
+            axpy_kernel[T, block_bytes / sizeof(T)](alpha * y.at(j), xp, a.data[b..<b + h])
+        i0 += h
+
+// --- Walks ----------------------------------------------------------------------------------------
+
+/** `y := beta * y`, where a zero `beta` writes zeros without reading `y`. */
+private scale_by[T: Real](beta: T, y: StridedMut[T])
+    if beta == T.one() then return
+    if beta != T.zero()
+        scal(beta, y)
+        return
+    var iy = y.first()
+    @unchecked
+        for _ in 0..<y.len
+            y.data[usize(iy)] = T.zero()
+            iy += y.inc
+
+/** `y += alpha * a * x`, a column at a time. */
+private gemv_walk_cols[T: Real](alpha: T, a: Matrix[T], x: Strided[T], y: StridedMut[T])
+    var jx = x.first()
+    @unchecked
+        for j in 0..<a.cols
+            val temp = alpha * x.data[usize(jx)]
+            var ia = j * a.col_stride
+            var iy = y.first()
+            for _ in 0..<a.rows
+                y.data[usize(iy)] = a.data[ia] * temp + y.data[usize(iy)]
+                ia += a.row_stride
+                iy += y.inc
+            jx += x.inc
+
+/** `y += alpha * a * x`, a row's dot product at a time. */
+private gemv_walk_rows[T: Real](alpha: T, a: Matrix[T], x: Strided[T], y: StridedMut[T])
+    var iy = y.first()
+    @unchecked
+        for i in 0..<a.rows
+            var temp = T.zero()
+            var ia = i * a.row_stride
+            var jx = x.first()
+            for _ in 0..<a.cols
+                temp = a.data[ia] * x.data[usize(jx)] + temp
+                ia += a.col_stride
+                jx += x.inc
+            y.data[usize(iy)] = temp * alpha + y.data[usize(iy)]
+            iy += y.inc
+
+/** `a += alpha * x * yᵀ`, a column at a time. */
+private ger_walk[T: Real](alpha: T, x: Strided[T], y: Strided[T], a: MatrixMut[T])
+    var jy = y.first()
+    @unchecked
+        for j in 0..<a.cols
+            val temp = alpha * y.data[usize(jy)]
+            var ia = j * a.col_stride
+            var ix = x.first()
+            for _ in 0..<a.rows
+                a.data[ia] = x.data[usize(ix)] * temp + a.data[ia]
+                ia += a.row_stride
+                ix += x.inc
+            jy += y.inc
+
+// --- The routines ---------------------------------------------------------------------------------
+
+/** `y := alpha * a * x + beta * y`, BLAS's `gemv`; pass `a.t()` for `trans = 'T'`.
+ *
+ * `x` has one element per column of `a` and `y` one per row, or it traps. A matrix with no rows or
+ * no columns leaves `y` as it is, whatever `beta`; otherwise a zero `beta` sets `y` to zero without
+ * reading it (a NaN there does not survive), and a zero `alpha` only scales `y`, reading neither `a`
+ * nor `x`.
+ */
+gemv[T: Real](alpha: T, a: Matrix[T], x: Strided[T], beta: T, y: StridedMut[T])
+    dim(a.cols, x.len)
+    dim(a.rows, y.len)
+    fits(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride)
+    walkable(x.data.len, x.len, x.inc)
+    walkable(y.data.len, y.len, y.inc)
+    if a.rows == 0 || a.cols == 0 || (alpha == T.zero() && beta == T.one()) then return
+    scale_by(beta, y)
+    if alpha == T.zero() then return
+    if a.row_stride == 1 && y.is_contiguous()
+        gemv_cols(alpha, a, x, y.data[0..<y.len])
+    else if a.col_stride == 1 && x.is_contiguous()
+        gemv_rows(alpha, a, x.data[0..<x.len], y)
+    else if a.row_stride <= a.col_stride
+        gemv_walk_cols(alpha, a, x, y)
+    else
+        gemv_walk_rows(alpha, a, x, y)
+
+/** `a := alpha * x * yᵀ + a`, BLAS's `ger`.
+ *
+ * `x` has one element per row of `a` and `y` one per column, or it traps. An empty matrix or a zero
+ * `alpha` returns at once without reading anything.
+ */
+ger[T: Real](alpha: T, x: Strided[T], y: Strided[T], a: MatrixMut[T])
+    dim(a.rows, x.len)
+    dim(a.cols, y.len)
+    fits(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride)
+    walkable(x.data.len, x.len, x.inc)
+    walkable(y.data.len, y.len, y.inc)
+    if a.rows == 0 || a.cols == 0 || alpha == T.zero() then return
+    if a.row_stride == 1 && x.is_contiguous()
+        ger_cols(alpha, x.data[0..<x.len], y, a)
+    else if a.col_stride == 1 && y.is_contiguous()
+        ger_cols(alpha, y.data[0..<y.len], x, a.t())
+    else if a.row_stride <= a.col_stride
+        ger_walk(alpha, x, y, a)
+    else
+        ger_walk(alpha, y, x, a.t())
