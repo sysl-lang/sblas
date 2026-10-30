@@ -37,7 +37,7 @@ throughout. GB/s; the last two columns are sysl as a percentage of each library.
 | f64 | scal | L1 1024 | 203.5 | 155.1 | 205.2 | 131 | 99 |
 | f64 | asum | L1 1024 | 122.9 | 112.0 | 123.1 | 110 | 100 |
 | f64 | nrm2 | L1 1024 | 20.6 | 36.5 | 9.0 | 56 | 228 |
-| f64 | iamax | L1 1024 | 79.0 | 52.8 | 103.1 | 150 | 77 |
+| f64 | iamax | L1 1024 | 118.2 | 54.0 | 106.9 | 219 | 111 |
 | f64 | copy | L1 1024 | 197.8 | 119.0 | 111.8 | 166 | 177 |
 | f64 | swap | L1 1024 | 220.4 | 263.5 | 153.1 | 84 | 144 |
 | f64 | rot | L1 1024 | 207.3 | 233.2 | 183.3 | 89 | 113 |
@@ -46,7 +46,7 @@ throughout. GB/s; the last two columns are sysl as a percentage of each library.
 | f64 | scal | L2 262144 | 135.8 | 486.4 | 134.8 | 28 | 101 |
 | f64 | asum | L2 262144 | 103.5 | 247.6 | 100.2 | 42 | 103 |
 | f64 | nrm2 | L2 262144 | 20.3 | 34.5 | 8.7 | 59 | 234 |
-| f64 | iamax | L2 262144 | 79.8 | 51.9 | 91.2 | 154 | 87 |
+| f64 | iamax | L2 262144 | 110.9 | 55.8 | 97.7 | 199 | 114 |
 | f64 | copy | L2 262144 | 98.5 | 476.1 | 115.9 | 21 | 85 |
 | f64 | swap | L2 262144 | 123.2 | 444.4 | 72.4 | 28 | 170 |
 | f64 | rot | L2 262144 | 119.8 | 386.1 | 111.5 | 31 | 107 |
@@ -55,7 +55,7 @@ throughout. GB/s; the last two columns are sysl as a percentage of each library.
 | f64 | scal | DRAM 4194304 | 122.4 | 191.1 | 113.2 | 64 | 108 |
 | f64 | asum | DRAM 4194304 | 79.9 | 166.1 | 80.8 | 48 | 99 |
 | f64 | nrm2 | DRAM 4194304 | 19.8 | 33.9 | 8.6 | 58 | 231 |
-| f64 | iamax | DRAM 4194304 | 67.0 | 48.7 | 72.4 | 138 | 93 |
+| f64 | iamax | DRAM 4194304 | 84.8 | 55.0 | 85.8 | 154 | 99 |
 | f64 | copy | DRAM 4194304 | 77.9 | 89.0 | 103.7 | 88 | 75 |
 | f64 | swap | DRAM 4194304 | 123.6 | 142.2 | 80.6 | 87 | 153 |
 | f64 | rot | DRAM 4194304 | 123.6 | 140.9 | 114.5 | 88 | 108 |
@@ -64,7 +64,7 @@ throughout. GB/s; the last two columns are sysl as a percentage of each library.
 | f32 | scal | L1 1024 | 200.7 | 107.0 | 174.8 | 188 | 115 |
 | f32 | asum | L1 1024 | 103.7 | 92.7 | 100.6 | 112 | 103 |
 | f32 | nrm2 | L1 1024 | 19.1 | 38.8 | 4.5 | 49 | 427 |
-| f32 | iamax | L1 1024 | 64.7 | 47.4 | 61.1 | 136 | 106 |
+| f32 | iamax | L1 1024 | 108.0 | 49.8 | 70.5 | 217 | 153 |
 | f32 | copy | L1 1024 | 185.0 | 61.4 | 90.9 | 301 | 204 |
 | f32 | swap | L1 1024 | 207.6 | 107.2 | 154.4 | 194 | 134 |
 | f32 | rot | L1 1024 | 193.1 | 124.5 | 180.6 | 155 | 107 |
@@ -73,7 +73,7 @@ throughout. GB/s; the last two columns are sysl as a percentage of each library.
 | f32 | scal | L2 262144 | 140.9 | 492.7 | 140.8 | 29 | 100 |
 | f32 | asum | L2 262144 | 93.7 | 251.0 | 105.3 | 37 | 89 |
 | f32 | nrm2 | L2 262144 | 20.2 | 34.8 | 4.3 | 58 | 467 |
-| f32 | iamax | L2 262144 | 71.2 | 53.8 | 93.1 | 132 | 76 |
+| f32 | iamax | L2 262144 | 122.9 | 55.0 | 120.8 | 224 | 102 |
 | f32 | copy | L2 262144 | 102.0 | 504.2 | 120.1 | 20 | 85 |
 | f32 | swap | L2 262144 | 142.3 | 508.5 | 90.8 | 28 | 157 |
 | f32 | rot | L2 262144 | 138.8 | 505.9 | 136.8 | 27 | 101 |
@@ -82,7 +82,7 @@ throughout. GB/s; the last two columns are sysl as a percentage of each library.
 | f32 | scal | DRAM 4194304 | 138.9 | 265.2 | 140.5 | 52 | 99 |
 | f32 | asum | DRAM 4194304 | 75.6 | 134.3 | 78.0 | 56 | 97 |
 | f32 | nrm2 | DRAM 4194304 | 20.4 | 34.5 | 4.3 | 59 | 471 |
-| f32 | iamax | DRAM 4194304 | 73.8 | 50.6 | 77.9 | 146 | 95 |
+| f32 | iamax | DRAM 4194304 | 88.9 | 54.4 | 95.1 | 163 | 93 |
 | f32 | copy | DRAM 4194304 | 92.6 | 204.3 | 115.0 | 45 | 81 |
 | f32 | swap | DRAM 4194304 | 138.8 | 191.9 | 80.3 | 72 | 173 |
 | f32 | rot | DRAM 4194304 | 133.9 | 178.7 | 125.8 | 75 | 106 |
@@ -113,11 +113,12 @@ on `a.t()`, CBLAS's `trans = 'T'`.
 
 What the numbers say:
 
-- **Every Level 1 routine but `iamax` is at OpenBLAS parity or better** at every size and both widths;
+- **Every Level 1 routine is at OpenBLAS parity or better** at every size and both widths, bar `iamax`
+  f32 DRAM (93%);
   `copy` in L2 and DRAM (75–85%) and f32 `asum` in L2 (89%) are the places below. `nrm2` runs 2.3x
   OpenBLAS's at f64 and 4.3–4.7x at f32, and 49–59% of Accelerate's, with Blue's scaling kept.
-- **`iamax` is 76–106% of OpenBLAS** in the rows above, which were measured with the previous
-  kernel; the `maximum`-based kernel has not been timed yet (load stayed above 10). It reads each
+- **`iamax` is 93–153% of OpenBLAS** in the rows above (the `iamax` rows were re-measured with the
+  `maximum`-based kernel at load 9.3 at the start and 8.1 at the end). It reads each
   chunk of 16 KB once for the NaN-propagating largest magnitude, one `fmax` per register, and a second
   time from L1 only when that beats every chunk before it.
 - **Level 2 is at OpenBLAS parity or better** except `ger` in f64 L2 and DRAM (91–94%) and f32 `gemv N`
