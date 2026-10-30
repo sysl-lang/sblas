@@ -1,0 +1,38 @@
+module sh.sysl.sblas_pool
+
+import sh.sysl.sblas.Workers
+import sh.sysl.pool.Pool
+
+// Workers for gemm_par on a standing pool of `sh.sysl.pool`: the threads are started once, with the
+// pool, and every `each` hands its jobs to them, where `sh.sysl.sblas.threads.Spawned` starts a
+// thread per job on every call. The calling thread runs the first job itself, as Spawned's does,
+// rather than sleeping while the pool works, so `n` workers need a pool of `n - 1` threads. The pool
+// is shared, not owned: the program keeps it, runs its own work on it between products, and many
+// `PoolWorkers` may stand on one pool.
+
+/** `n` jobs per `each`, the first on the calling thread and the rest on `pool`'s threads:
+ * `gemm_par(&on(Pool.new(5)), …)` multiplies on six.
+ */
+struct PoolWorkers
+    pool: &Pool
+    n: usize
+
+/** Workers one more than `pool` has threads: the calling thread and every one of the pool's. */
+on(pool: &Pool) -> PoolWorkers = PoolWorkers(pool, pool.threads() + 1)
+
+impl Workers for PoolWorkers
+    count(*self) -> usize = self.n
+
+    /** Hands every job past the first to the pool as a task of one scope, runs `job(0)` here
+     * meanwhile, and returns once all have run. One job runs here alone, with no task at all.
+     */
+    @scoped(job)
+    each(*self, job: &sync Fn(usize) -> unit)
+        val n = self.n
+        if n <= 1
+            if n == 1 then job(0)
+            return
+        self.pool.scope((s) ->
+            for w in 1..<n
+                s.spawn((_) -> job(w))
+            job(0))

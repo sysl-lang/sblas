@@ -3,3 +3,4 @@
 *.a
 .sysl/
 scratch/
+bench/bench

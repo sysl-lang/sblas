@@ -1,0 +1,134 @@
+module sh.sysl.sblas_pool
+@tests
+
+import sh.sysl.sblas.{Real, Matrix, matrix, matrix_mut}
+import sh.sysl.sblas.heap.{gemm_alloc, gemm_par_alloc}
+import sh.sysl.pool.{Pool, worker_index}
+import sysl.buf.{Buf, buf_filled}
+import sysl.sync.Atomic
+
+// gemm_par on a standing pool against single-threaded gemm, every element of C's storage compared for
+// equality. The values are not short binary fractions, so a sum taken in another order shows. The
+// shapes sit one either side of every blocking edge of both widths on aarch64 (MR 8 and 16, NR 6, KC
+// 256 and 512, MC 120 and 240, NC 3072), and on any other target they are still a spread of fringes.
+
+private struct Noise
+    state: u64
+
+impl Noise
+    next(*self) -> u64
+        self.state ^= self.state << 13
+        self.state ^= self.state >> 7
+        self.state ^= self.state << 17
+        self.state
+
+private noisy[T: Real](n: usize, g: *Noise) -> Buf[T]
+    val b: Buf[T] = buf_filled(n, T.zero())
+    for i in 0..<n
+        b[i] = T(int(g.next() >> 44) - 524288) / T(4099)
+    b
+
+/** A column-major `rows` x `cols` with leading dimension `rows + 3`, or the transpose of one. */
+private view_of[T](data: []const T, rows: usize, cols: usize, transposed: bool) -> Matrix[T] =
+    if transposed then matrix(data, cols, rows, cols + 3).t() else matrix(data, rows, cols, rows + 3)
+
+private check_pool[T: Real](workers: *PoolWorkers, m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_t: bool, b_t: bool)
+    var g = Noise(seed * 2654435761 + 1)
+    val a = noisy[T]((if a_t then m else k) * 3 + m * k + 3, &g)
+    val b = noisy[T]((if b_t then k else n) * 3 + k * n + 3, &g)
+    val c = noisy[T]((m + 3) * n + 1, &g)
+    if beta == T.zero()
+        for i in 0..<c.len()
+            c[i] = T.nan()
+    val c1: Buf[T] = buf_filled(c.len(), T.zero())
+    for i in 0..<c.len()
+        c1[i] = c[i]
+    val av = view_of(a.view(), m, k, a_t)
+    val bv = view_of(b.view(), k, n, b_t)
+    gemm_alloc(alpha, av, bv, beta, matrix_mut(c.view(), m, n, m + 3))
+    gemm_par_alloc(workers, alpha, av, bv, beta, matrix_mut(c1.view(), m, n, m + 3))
+    for i in 0..<c.len()
+        assert(c[i] == c1[i] || (c[i].is_nan() && c1[i].is_nan()), "gemm_par on a pool differs from gemm")
+    if beta == T.zero()
+        for j in 0..<n
+            for i in 0..<m
+                assert(!c1[i + j * (m + 3)].is_nan(), "gemm_par on a pool left a NaN in C with beta zero")
+
+/** Every empty dimension, one either side of MR, NR, KC and MC at both widths, and past NC. */
+private val shapes: [17](usize, usize, usize) =
+    [(0, 5, 7), (5, 0, 7), (5, 7, 0), (1, 1, 1), (7, 7, 3), (9, 5, 9), (15, 17, 5), (17, 13, 17), (37, 29, 255),
+        (13, 11, 257), (121, 7, 5), (119, 19, 33), (239, 20, 511), (241, 9, 513), (247, 2, 3), (19, 3073, 3),
+        (517, 43, 300)]
+
+private val counts: [4]usize = [1, 2, 3, 6]
+
+private sweep[T: Real](pool: &Pool, seed: u64)
+    var s = seed
+    for w in counts
+        var workers = PoolWorkers(pool, w)
+        for (m, n, k) in shapes
+            check_pool[T](&workers, m, n, k, T(3) / T(7), T(-5) / T(11), s, false, false)
+            check_pool[T](&workers, m, n, k, T(-2) / T(3), T.zero(), s + 1, true, true)
+            check_pool[T](&workers, m, n, k, T(5) / T(9), T.one(), s + 2, true, false)
+            check_pool[T](&workers, m, n, k, T.zero(), T(7) / T(5), s + 3, false, true)
+            s += 4
+
+@test("gemm_par on a pool at 1, 2, 3 and 6 workers is bitwise gemm across every fringe, f64")
+pool_f64()
+    sweep[f64](Pool.new(6), 31)
+
+@test("gemm_par on a pool at 1, 2, 3 and 6 workers is bitwise gemm across every fringe, f32")
+pool_f32()
+    sweep[f32](Pool.new(6), 32)
+
+@test("one pool serves hundreds of gemm_par calls, with other work spawned on it between them")
+pool_reused()
+    val pool = Pool.new(3)
+    var workers = on(pool)
+    assert(workers.count() == 4)
+    for i in 0..<300
+        check_pool[f64](&workers, 1 + i % 41, 1 + i * 7 % 23, 1 + i * 13 % 29,0.75, if i % 3 == 0 then 0.0 else 0.5, u64(i), i % 2 == 0, i % 5 == 0)
+        assert(pool.spawn(() -> i * 2).join() == i * 2)
+
+@test("gemm_par on more workers than row and column panels idles the rest, bitwise as gemm")
+pool_more_workers_than_blocks()
+    val pool = Pool.new(3)
+    var six = PoolWorkers(pool, 6)
+    check_pool[f64](&six, 9, 5, 4, 1.0 / 3.0, 2.0 / 7.0, 5, false, false)
+    check_pool[f32](&six, 17, 6, 4, 1.0 / 3.0, 2.0 / 7.0, 6, true, false)
+    var many = PoolWorkers(pool, 64)
+    check_pool[f64](&many, 1, 1, 9, 1.0 / 3.0, 2.0 / 7.0, 7, true, false)
+    check_pool[f64](&many, 37, 29, 300, -0.5, 0.0, 8, false, true)
+
+@test("PoolWorkers runs every job once, each with its own number, on fewer threads than jobs too")
+pool_runs_each_job_once()
+    val pool = Pool.new(2)
+    for w in [1usize, 2, 5, 9]
+        var hits: [9]Atomic[int] = [Atomic(0); 9]
+        val v = hits[..]
+        var workers = PoolWorkers(pool, w)
+        workers.each((i) -> v[i].add(1 + int(i)))
+        for i in 0..<9
+            assert(hits[i].load() == (if i < w then 1 + int(i) else 0))
+
+@test("PoolWorkers runs the first job on the calling thread and the rest on the pool's")
+pool_first_job_here()
+    val pool = Pool.new(2)
+    for w in [1usize, 3]
+        var where: [3]Atomic[int] = [Atomic(-2); 3]
+        val v = where[..]
+        var workers = PoolWorkers(pool, w)
+        workers.each((i) -> v[i].store(worker_index() match
+            Some(x) -> int(x)
+            None -> -1))
+        assert(where[0].load() == -1)
+        for i in 1..<3
+            val got = where[i].load()
+            assert(if i < w then got >= 0 && got < 2 else got == -2)
+
+@test("PoolWorkers with no workers runs no job and gemm_par refuses it", should_trap)
+pool_no_workers()
+    var none = PoolWorkers(Pool.new(1), 0)
+    val a: Buf[f64] = buf_filled(4, 1.0)
+    val c: Buf[f64] = buf_filled(4, 0.0)
+    gemm_par_alloc(&none, 1.0, matrix(a.view(), 2, 2, 2), matrix(a.view(), 2, 2, 2), 0.0, matrix_mut(c.view(), 2, 2, 2))

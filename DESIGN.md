@@ -236,8 +236,45 @@ what lets the job, a closure written at the call inside gemm, borrow the matrice
 share them. `sysl.threads` has no pool, so `sh.sysl.sblas.threads.Spawned(n)` is one over `spawn`:
 each `each` starts a thread per job past the first, runs the first itself, and joins the rest (a
 fan-out joined by a loop over the same slice). It is a module of its own because it requires `os`,
-which neither the core nor `heap` does; a program that runs many small products keeps a standing pool
-and implements `Workers` for it the same way.
+which neither the core nor `heap` does. It stays as the dependency-free example.
+
+**A standing pool is a workspace member, `pool-workers/`** (package `sblas-pool`, module
+`sh.sysl.sblas_pool`), so the core never depends on `sysl-lang/pool` and only a program that wants
+the pool names it. Its module cannot be `sh.sysl.sblas.pool`: a name inside a path another package
+offers is refused (*"'sh.sysl.sblas' is both a module of this project and one sblas offers"*,
+`reference/packages.md` § two packages cannot quietly share a name). `PoolWorkers(pool: &Pool, n)`
+holds the program's pool by reference — shared, not owned, so the program runs its own tasks on it
+between products — and its `each` opens one `Pool.scope`, spawns `job(1)` … `job(n - 1)` into it and
+runs `job(0)` on the calling thread, as `Spawned` does; `on(pool)` is `pool.threads() + 1` workers.
+One `scope` of direct spawns rather than `parallel_for`, since `parallel_for` adds a level of halving
+tasks for what is a handful of jobs. Measured (`./bench each`, empty jobs, median of 7 x 20000):
+
+| workers | `Spawned` | pool |
+|---:|---:|---:|
+| 2 | 12.4 µs | 2.9 µs |
+| 4 | 24.2 | 5.3 |
+| 6 | 34.4 | 9.1 |
+
+Running job 0 on the caller matters: the first version handed every job to the pool and slept in
+`scope`, and a single worker then ran at 85–91% of `Spawned(1)` at n = 128–512 f64 (a task handoff
+and a condvar wake per `each`); with job 0 here, and one worker running inline with no task at all,
+the two are level at every size.
+
+**What is left at small n is the two `each` per panel, and it is small.** An n = 256 product is one
+KC x NC panel, so two `each`: 2 x 5.3 µs at 4 workers and 2 x 9.1 µs at 6, against a product of about
+0.25 and 0.22 ms — 4% and 8%. The grid adds 0% at 4 workers (`par_grid(4, 32, 43)` = 4 x 1, largest
+block 344 tiles, the mean exactly) and 4.6% at 6 (2 x 3, 240 against a mean of 229) for f64. Fusing
+the two `each` would need a barrier inside the jobs, which a `Workers` that runs jobs in turn (more
+jobs than threads, `Backwards`) would deadlock on; packing B per job instead duplicates the packing
+`tm` times and changes `gemm_par_work_len`. Neither is worth 2–4% at one size. Run to run, the n =
+256 figures move by ±20% on this machine at load 7–10, more than either cost. P-core / E-core placement
+is not measured: macOS has no public call that pins a thread to a core class, so it is not claimed as
+a cause.
+
+**f64 at four threads and n = 512–1024 trails OpenBLAS in both runs, on either `Workers`** (pool
+84–88%, `Spawned` 84–94%, where f64 at one thread is 99–108%). It does not come from the thread
+mechanism (the two are level there) or from the barriers (well under 1% of an n = 1024 product), nor
+from the grid (`par_grid(4, …)` splits rows four ways, evenly); it is open.
 
 **The entry is a second routine, `gemm_par(workers, alpha, a, b, beta, c, work)`**, so `gemm` and its
 single-thread speed are untouched, and `gemm_par_work_len[T](m, n, k, workers)` sizes a `GemmWork`
@@ -257,7 +294,8 @@ same order, as single-threaded gemm makes it; the result is bitwise identical fo
 The tests hold it to that: every element of C's storage, margins included, equal to gemm's on values
 whose sums round, across every blocking fringe, transposes, block views, `alpha = 0`, `beta` of zero
 (C seeded with NaN) and one, at 1, 2, 3, 5 and 64 workers on a pool that runs its jobs last first, and
-at 1, 2, 3, 6 and 7 real threads; and once against OpenBLAS on three threads.
+at 1, 2, 3, 6 and 7 real threads, and at 1, 2, 3 and 6 workers of a standing pool across both
+widths' fringes (`pool-workers/`); and once against OpenBLAS on three threads.
 
 ## Oracles
 
@@ -374,9 +412,11 @@ least 80% of its DGEMM), with Accelerate reported alongside.
    `sh.sysl.sblas.heap.gemm_alloc` and `trsm_alloc`.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads** — *decided*: the caller's pool, through the core's `Workers` trait; the core starts no
-   thread. Open: `sysl.threads` has no pool, scope or barrier, so `sh.sysl.sblas.threads.Spawned`
-   starts threads per call over `spawn` — should the standard library supply a standing pool (with an
-   `impl Workers` here)?
+   thread. A standing pool is `sysl-lang/pool`, behind `PoolWorkers` in the `pool-workers/` member
+   (decided); `Spawned` stays as the dependency-free example. Open: a coordinate fetches only a
+   repository's root package, so a program outside this repository cannot depend on `sblas-pool` —
+   give it a repository of its own (`sysl-lang/sblas-pool`), or should a coordinate be able to name a
+   workspace member?
 8. **Vector `mul_add` and `abs`**: add them to `<N>T` before the micro-kernels are written?
 9. **The `@tests` impl rule**: allow an `impl` of a test-file trait for any type?
 10. **Tile sizes** — *decided*: fixed per target at compile time.

@@ -3,4 +3,5 @@ optimization = "3"
 dependencies {
     sblas { workspace = true }
     cblas-oracle { workspace = true }
+    sblas-pool { workspace = true }
 }

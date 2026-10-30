@@ -1,0 +1,9 @@
+// sh.sysl.sblas's `Workers` on a standing work-stealing pool, `github.com/sysl-lang/pool`. A project of
+// its own so that the sblas package itself depends on nothing and starts no thread: a program that
+// wants gemm_par on a pool it keeps names this one too.
+package { name = "sblas-pool", version = "0.0.1", sysl = "0.8.3" }
+optimization = "2"
+dependencies {
+    sblas { workspace = true }
+    pool { git = "github.com/sysl-lang/pool", version = "0.1.4" }
+}
