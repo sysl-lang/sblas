@@ -275,13 +275,11 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   (`a.mul_add(b, acc)`) rather than relying on `a * b + c` contracting at `optimization = "2"`; so do
   gemm's micro-kernel (`a[v].mul_add(b[l], acc)`, the same `fmla` by element as before) and trsm's
   leaf.
-- **F5: a vector `load` as a method's argument takes no width from the receiver.** `acc =
-  a.mul_add(y.load(i), acc)` with `a: <16>f64` is refused — *'load' answers a vector, and how many
-  lanes it takes is the vector type's to say — nothing here says which* — though `a * y.load(i) + acc`
-  is accepted, since an operator's other operand gives the width (`reference/vectors.md`, "Where the
-  width comes from"). `mul_add`'s `b` and `c` are each the receiver's vector type or its lane type, so
-  the receiver decides it as an operand would. The kernels bind the load to a `val` of the vector type
-  first, as the diagnostic asks.
+- **F5: a vector `load` as an argument of `mul_add`, `select` or `shuffle` took no width — fixed in
+  sysl 0.8.2**, where it takes the receiver's, as an operator's other operand gives it
+  (`reference/vectors.md`, "Where the width comes from"). `acc = a.mul_add(y.load(i), acc)` compiles, and
+  `dot` and `axpy` write it so; the receiver itself is still bound to a typed `val`, since nothing gives
+  a receiver's load its width.
 - **An `impl` in a `@tests` file is refused for a builtin type even when the trait is the file's
   own.** The stated reason — a trait answering differently in tests and in the shipped program — does
   not arise for a trait that exists only in tests. This is why the oracle trait lives in the `oracle/`

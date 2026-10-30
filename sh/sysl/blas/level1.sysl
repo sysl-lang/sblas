@@ -46,8 +46,7 @@ private[blas] dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) ->
     @unchecked
         while i + W <= x.len
             val a: <W>T = x.load(i)
-            val b: <W>T = y.load(i)
-            acc = a.mul_add(b, acc)
+            acc = a.mul_add(y.load(i), acc)
             i += W
         var s = acc.sum()
         while i < x.len
@@ -61,8 +60,7 @@ private[blas] axpy_kernel[T: Real, const W: usize](alpha: T, x: []const T, y: []
     @unchecked
         while i + W <= x.len
             val a: <W>T = x.load(i)
-            val b: <W>T = y.load(i)
-            y.store(i, a.mul_add(alpha, b))
+            y.store(i, a.mul_add(alpha, y.load(i)))
             i += W
         while i < x.len
             y[i] = x[i] * alpha + y[i]
