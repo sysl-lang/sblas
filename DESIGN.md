@@ -271,10 +271,10 @@ jobs than threads, `Backwards`) would deadlock on; packing B per job instead dup
 is not measured: macOS has no public call that pins a thread to a core class, so it is not claimed as
 a cause.
 
-**f64 at four threads and n = 512–1024 trails OpenBLAS in both runs, on either `Workers`** (pool
-84–88%, `Spawned` 84–94%, where f64 at one thread is 99–108%). It does not come from the thread
-mechanism (the two are level there) or from the barriers (well under 1% of an n = 1024 product), nor
-from the grid (`par_grid(4, …)` splits rows four ways, evenly); it is open.
+**f64 at four threads and n = 512–2048 is level with OpenBLAS** over three clean runs (pool 99–111%
+at n = 1024, median about 104% over n = 512–1024 in ten rounds below load 10). Single rounds dip to
+83–96%, but the dips hit OpenBLAS's own timings in the same round, so they are load, not sblas.
+Against the ideal of one thread's speed times four it runs at 84–93%.
 
 **The entry is a second routine, `gemm_par(workers, alpha, a, b, beta, c, work)`**, so `gemm` and its
 single-thread speed are untouched, and `gemm_par_work_len[T](m, n, k, workers)` sizes a `GemmWork`

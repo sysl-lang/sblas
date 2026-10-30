@@ -265,5 +265,5 @@ load 7.1 at the start and 8.4 at the end.
   KC x NC panel and two `each`, so 4% of it at four threads and 8% at six; DESIGN.md § Threading
   has the arithmetic and why fusing them is not done.
 - **From n = 1024 the two are level**, 85–108% of OpenBLAS at 2–6 threads, and one worker runs
-  gemm's own speed on both (106–108%). f64 at four threads and n = 512–1024 trails in both runs
-  (pool 84–88%, `Spawned` 84–94%): the same on either, so not the thread mechanism, and open.
+  gemm's own speed on both (106–108%). f64 at four threads, which read 84–88% in the two runs above,
+  is level over three clean runs: pool 99–111% at n = 1024 and 94–104% at n = 2048, `Spawned` 90–105%.
