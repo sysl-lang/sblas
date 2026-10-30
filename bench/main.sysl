@@ -124,9 +124,76 @@ private bench_width[T: Oracle](name: string)
             val ob = median(rates[2][..])
             print(f"| ${name} | ${op.name()} | ${places[k]} ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
+// --- Level 2 ---------------------------------------------------------------------------------------
+//
+// Square column-major matrices whose storage (at f64) fits L1, fits L2, and lives in main memory. The
+// unit is GFLOPS, 2mn per call for each routine; `gemv T` is `gemv` on `a.t()`, CBLAS's `trans = 'T'`.
+
+private val dims: [3]usize = [48, 256, 2048]
+
+enum Op2
+    GemvN
+    GemvT
+    Ger
+
+private val ops2: [3]Op2 = [Op2.GemvN, Op2.GemvT, Op2.Ger]
+
+impl Op2
+    name(self) -> string = self match
+        GemvN -> "gemv N"
+        GemvT -> "gemv T"
+        Ger -> "ger"
+
+/** One call of `op` by implementation `who`. `ger` adds a tiny multiple, so `a` does not drift. */
+private once2[T: Oracle](op: Op2, who: usize, n: usize, a: []T, x: []T, y: []T)
+    val one = T.one()
+    val tiny = T.from_unit(1e-9)
+    if who == 0
+        op match
+            GemvN -> gemv(one, matrix(a, n, n, n), view(x), one, view_mut(y))
+            GemvT -> gemv(one, matrix(a, n, n, n).t(), view(x), one, view_mut(y))
+            Ger -> ger(tiny, view(x), view(y), matrix_mut(a, n, n, n))
+        return
+    val lib = libs[who - 1]
+    val nn = i32(n)
+    op match
+        GemvN -> T.o_gemv(lib, false, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(x), 1, one, as_mut_ptr(y), 1)
+        GemvT -> T.o_gemv(lib, true, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(x), 1, one, as_mut_ptr(y), 1)
+        Ger -> T.o_ger(lib, nn, nn, tiny, as_mut_ptr(x), 1, as_mut_ptr(y), 1, as_mut_ptr(a), nn)
+
+private bench_level2[T: Oracle](name: string)
+    for k in 0..<dims.len
+        val n = dims[k]
+        var a = fill[T](n * n)
+        var x = fill[T](n)
+        var y = fill[T](n)
+        val reps = int(work / f64(n * n)) + 1
+        for op in ops2
+            var rates: [3][trials]f64
+            for t in 0..<trials
+                for who in 0..<3
+                    val t0 = monotonic().us
+                    for _ in 0..<reps
+                        once2(op, who, n, black_box(a.view()), black_box(x.view()), black_box(y.view()))
+                    val dt = f64(monotonic().us - t0) * 1e-6
+                    rates[who][t] = 2 * f64(n * n) * f64(reps) / dt * 1e-9
+                    // gemv accumulates into y, so it is reset, outside the clock, after each run.
+                    for i in 0..<n
+                        y.view()[i] = T.from_unit(f64(i % 17) * 0.0625 - 0.5)
+            val ours = median(rates[0][..])
+            val acc = median(rates[1][..])
+            val ob = median(rates[2][..])
+            print(f"| ${name} | ${op.name()} | ${places[k]} ${n}x${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
+
 main()
     print(f"GB/s, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
     print("| type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |")
     print("|---|---|---|---:|---:|---:|---:|---:|")
     bench_width[f64]("f64")
     bench_width[f32]("f32")
+    print("")
+    print(f"Level 2, GFLOPS (2mn per call), median of ${trials} interleaved trials")
+    print("| type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |")
+    print("|---|---|---|---:|---:|---:|---:|---:|")
+    bench_level2[f64]("f64")
+    bench_level2[f32]("f32")

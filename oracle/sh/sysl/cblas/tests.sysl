@@ -3,6 +3,7 @@ module sh.sysl.cblas
 
 import sh.sysl.blas.*
 import sysl.slices.as_mut_ptr
+import sysl.buf.{Buf, buf}
 
 // Every routine of sh.sysl.blas against the platform's CBLAS on generated data, at both widths, every
 // length class the kernels distinguish, and strides of each sign. The reference values come from the
@@ -147,6 +148,171 @@ private check_iamax_ties[T: Oracle](lib: Lib)
         val n = (6 - 1) / usize(inc.abs()) + 1
         val got = iamax(strided(xs[..], n, inc))
         assert(got == Some(usize(T.o_iamax(lib, i32(n), as_mut_ptr(xs[..]), i32(inc)))), "iamax tie")
+
+// --- Level 2 ---------------------------------------------------------------------------------------
+
+/** Shapes (rows, columns): empty either way, one element, one row or column, a few kernel steps with
+ * tails both ways, and a matrix taller (then wider) than a panel at either width.
+ */
+private val shapes: [11](usize, usize) = [(0, 0), (0, 4), (4, 0), (1, 1), (1, 9), (9, 1), (5, 37), (37, 5), (70, 33), (4200, 3), (3, 4200)]
+
+/** Stride pairs for x and y: both contiguous (the kernel paths), each sign, and the walks. */
+private val incs2: [6](int, int) = [(1, 1), (-1, -1), (2, -3), (-2, 1), (1, 3), (3, -1)]
+
+private const big: usize = 25300
+
+/** Equal, or both NaN: what an element nobody should have written must still be. */
+private same[T: Oracle](a: T, b: T) -> bool = a == b || (a.is_nan() && b.is_nan())
+
+private zeros[T: Oracle](n: usize) -> Buf[T]
+    var b: Buf[T] = buf()
+    for _ in 0..<n
+        b.push(T.zero())
+    b
+
+/** A column-major `m` x `n` matrix of values in [-1, 1) whose padding rows are NaN. */
+private fill_matrix[T: Oracle](a: []T, m: usize, n: usize, lda: usize, s: *Stream)
+    for j in 0..<n
+        for i in 0..<lda
+            a[j * lda + i] = if i < m then T.from_unit(s.next()) else T.nan()
+
+/** Every element of the storage `got` and `want` share: covered ones within the bound, the rest untouched. */
+private check_vector[T: Oracle](got: []T, want: []T, len: usize, inc: int, bounds: []T, ulps: T, what: string)
+    val step = usize(inc.abs())
+    for k in 0..<got.len
+        if len > 0 && k % step == 0
+            val i = if inc > 0 then k / step else len - 1 - k / step
+            assert(same(got[k], want[k]) || near(got[k], want[k], bounds[i], ulps), what)
+        else
+            assert(same(got[k], want[k]), what)
+
+/** `alpha` and `beta` as (alpha, beta): general, alpha zero, beta zero (y seeded with NaN), beta one, both. */
+private val scalings: [5](f64, f64) = [(1.5, -0.75), (0, 2.5), (-2, 0), (0.5, 1), (0, 1)]
+
+private check_gemv[T: Oracle](lib: Lib, seed: u64)
+    var s = Stream(seed)
+    var ab = zeros[T](big)
+    var xb = zeros[T](big)
+    var ya = zeros[T](big)
+    var yb = zeros[T](big)
+    var bounds = zeros[T](big)
+    for (m, n) in shapes
+        for extra in [0, 3]
+            val lda = (if m == 0 then 1 else m) + usize(extra)
+            val asto = ab.view()[0..<(if n == 0 then 1 else lda * n)]
+            fill_matrix(asto, m, n, lda, &s)
+            for trans in [false, true]
+                val xl = if trans then m else n
+                val yl = if trans then n else m
+                val a = if trans then matrix(asto, m, n, lda).t() else matrix(asto, m, n, lda)
+                for (incx, incy) in incs2
+                    val xs = xb.view()[0..<extent(xl, incx)]
+                    val ly = extent(yl, incy)
+                    for (al, be) in scalings
+                        val alpha = T.from_unit(al)
+                        val beta = T.from_unit(be)
+                        fill(xs, &s, 1)
+                        if be == 0
+                            for k in 0..<ly
+                                ya.view()[k] = T.nan()
+                        else
+                            fill(ya.view()[0..<ly], &s, 1)
+                        for k in 0..<ly
+                            yb.view()[k] = ya.view()[k]
+                        val x = strided(xs, xl, incx)
+                        val y0 = strided(ya.view()[0..<ly], yl, incy)
+                        for i in 0..<yl
+                            var b = if be == 0 then T.zero() else (beta * y0.at(i)).abs()
+                            for j in 0..<xl
+                                b = b + (alpha * a.at(i, j) * x.at(j)).abs()
+                            bounds.view()[i] = b
+                        gemv(alpha, a, x, beta, strided_mut(ya.view()[0..<ly], yl, incy))
+                        // With nothing to sum over, the reference BLAS and OpenBLAS return at once and
+                        // leave y alone; Accelerate does too, except for the transpose of a matrix with no
+                        // rows, where it scales y by beta. sh.sysl.blas follows the reference, so there y
+                        // is checked against its starting value (`gemv_empty_inner` pins the divergence).
+                        if !(lib == Lib.Accelerate && trans && m == 0 && n > 0)
+                            T.o_gemv(lib, trans, i32(m), i32(n), alpha, as_mut_ptr(asto), i32(lda), as_mut_ptr(xs), i32(incx), beta, as_mut_ptr(yb.view()[0..<ly]), i32(incy))
+                        check_vector(ya.view()[0..<ly], yb.view()[0..<ly], yl, incy, bounds.view(), T.from_unit(f64(xl + 2)), "gemv")
+
+private check_ger[T: Oracle](lib: Lib, seed: u64)
+    var s = Stream(seed)
+    var aa = zeros[T](big)
+    var ab = zeros[T](big)
+    var xb = zeros[T](big)
+    var yb = zeros[T](big)
+    for (m, n) in shapes
+        for extra in [0, 3]
+            val lda = (if m == 0 then 1 else m) + usize(extra)
+            val la = if n == 0 then 1 else lda * n
+            for (incx, incy) in incs2
+                val xs = xb.view()[0..<extent(m, incx)]
+                val ys = yb.view()[0..<extent(n, incy)]
+                for al in [1.25, 0]
+                    for flip in [false, true]
+                        val alpha = T.from_unit(al)
+                        fill_matrix(aa.view()[0..<la], m, n, lda, &s)
+                        for k in 0..<la
+                            ab.view()[k] = aa.view()[k]
+                        fill(xs, &s, 1)
+                        fill(ys, &s, 1)
+                        val x = strided(xs, m, incx)
+                        val y = strided(ys, n, incy)
+                        val a = matrix_mut(aa.view()[0..<la], m, n, lda)
+                        if flip
+                            ger(alpha, y, x, a.t())
+                        else
+                            ger(alpha, x, y, a)
+                        T.o_ger(lib, i32(m), i32(n), alpha, as_mut_ptr(xs), i32(incx), as_mut_ptr(ys), i32(incy), as_mut_ptr(ab.view()[0..<la]), i32(lda))
+                        for k in 0..<la
+                            val got = aa.view()[k]
+                            val want = ab.view()[k]
+                            val i = k % lda
+                            val j = k / lda
+                            if i < m && j < n
+                                val b = (alpha * x.at(i) * y.at(j)).abs() + want.abs()
+                                assert(same(got, want) || near(got, want, b, 3), "ger")
+                            else
+                                assert(same(got, want), "ger touched the padding")
+
+@test("gemv agrees with Accelerate and OpenBLAS at every shape, stride, transpose and scaling, f64")
+oracle_gemv_f64()
+    for lib in libs
+        check_gemv[f64](lib, 5)
+
+@test("with nothing to sum over, y is left as the reference leaves it, except by Accelerate's transposed gemv")
+gemv_empty_inner()
+    var a: [1]f64 = [9]
+    var x: [1]f64 = [9]
+    for trans in [false, true]
+        val m = if trans then 0 else 2
+        val n = if trans then 2 else 0
+        var ours = [3.0, 4]
+        var ob = [3.0, 4]
+        var acc = [3.0, 4]
+        gemv(1.0, if trans then matrix(a[0..<0], 0, 2, 1).t() else matrix(a[0..<0], 2, 0, 2), strided(x[..], 0, 1), 0.5, view_mut(ours[..]))
+        f64.o_gemv(Lib.OpenBLAS, trans, m, n, 1, as_mut_ptr(a[..]), 2, as_mut_ptr(x[..]), 1, 0.5, as_mut_ptr(ob[..]), 1)
+        f64.o_gemv(Lib.Accelerate, trans, m, n, 1, as_mut_ptr(a[..]), 2, as_mut_ptr(x[..]), 1, 0.5, as_mut_ptr(acc[..]), 1)
+        assert(ours == [3.0, 4] && ob == [3.0, 4], "the reference leaves y")
+        if trans
+            assert(acc == [1.5, 2], "Accelerate scales y when the transpose has no columns")
+        else
+            assert(acc == [3.0, 4], "Accelerate leaves y when the matrix has no columns")
+
+@test("gemv agrees with Accelerate and OpenBLAS at every shape, stride, transpose and scaling, f32")
+oracle_gemv_f32()
+    for lib in libs
+        check_gemv[f32](lib, 6)
+
+@test("ger agrees with Accelerate and OpenBLAS at every shape and stride, either way round, f64")
+oracle_ger_f64()
+    for lib in libs
+        check_ger[f64](lib, 7)
+
+@test("ger agrees with Accelerate and OpenBLAS at every shape and stride, either way round, f32")
+oracle_ger_f32()
+    for lib in libs
+        check_ger[f32](lib, 8)
 
 @test("dot, nrm2, asum and iamax agree with Accelerate and OpenBLAS, f64")
 oracle_reductions_f64()

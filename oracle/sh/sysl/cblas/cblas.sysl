@@ -3,7 +3,7 @@ module sh.sysl.cblas
 
 import sh.sysl.blas.Real
 
-// The Level 1 routines of two CBLAS implementations, declared for the checks and the benchmarks to
+// The Level 1 and Level 2 routines of two CBLAS implementations, declared for the checks and the benchmarks to
 // measure sh.sysl.blas against: the platform's (Accelerate on macOS, where libcblas resolves into
 // vecLib) and OpenBLAS. A CBLAS pointer is the lowest address a vector covers, whatever the sign of
 // its stride.
@@ -44,6 +44,17 @@ extern "cblas_drotg" c_drotg(a: *f64, b: *f64, c: *f64, s: *f64)
 extern "cblas_srotg" c_srotg(a: *f32, b: *f32, c: *f32, s: *f32)
 extern "cblas_idamax" c_idamax(n: i32, x: *f64, incx: i32) -> i32
 extern "cblas_isamax" c_isamax(n: i32, x: *f32, incx: i32) -> i32
+
+// Level 2. `order` and `trans` are CBLAS's enumerators: column-major is 102, no transpose 111,
+// transpose 112.
+private const col_major: i32 = 102
+
+private trans_code(trans: bool) -> i32 = if trans then 112 else 111
+
+extern "cblas_dgemv" c_dgemv(order: i32, trans: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_sgemv" c_sgemv(order: i32, trans: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_dger" c_dger(order: i32, m: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32)
+extern "cblas_sger" c_sger(order: i32, m: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32)
 
 /** 1 when OpenBLAS's `cblas_ddot` is a different function from the one the link bound. */
 @needs(os)
@@ -89,6 +100,14 @@ extern "sysl_ob_srotg" ob_srotg(a: *f32, b: *f32, c: *f32, s: *f32)
 extern "sysl_ob_idamax" ob_idamax(n: i32, x: *f64, incx: i32) -> i32
 @needs(os)
 extern "sysl_ob_isamax" ob_isamax(n: i32, x: *f32, incx: i32) -> i32
+@needs(os)
+extern "sysl_ob_dgemv" ob_dgemv(order: i32, trans: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+@needs(os)
+extern "sysl_ob_sgemv" ob_sgemv(order: i32, trans: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+@needs(os)
+extern "sysl_ob_dger" ob_dger(order: i32, m: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32)
+@needs(os)
+extern "sysl_ob_sger" ob_sger(order: i32, m: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32)
 
 /** One width's CBLAS entry points in both libraries, so a check or a benchmark is written once for
  * both widths and both libraries.
@@ -105,6 +124,10 @@ trait Oracle: Real
     o_rot(lib: Lib, n: i32, x: *Self, incx: i32, y: *Self, incy: i32, c: Self, s: Self)
     o_rotg(lib: Lib, a: *Self, b: *Self, c: *Self, s: *Self)
     o_iamax(lib: Lib, n: i32, x: *Self, incx: i32) -> i32
+    /** Column-major `gemv`: `a` is `m` x `n`, and `trans` multiplies by its transpose. */
+    o_gemv(lib: Lib, trans: bool, m: i32, n: i32, alpha: Self, a: *Self, lda: i32, x: *Self, incx: i32, beta: Self, y: *Self, incy: i32)
+    /** Column-major `ger`: `a` is `m` x `n`. */
+    o_ger(lib: Lib, m: i32, n: i32, alpha: Self, x: *Self, incx: i32, y: *Self, incy: i32, a: *Self, lda: i32)
 
 impl Oracle for f64
     from_unit(u: f64) -> f64 = u
@@ -138,6 +161,12 @@ impl Oracle for f64
     o_iamax(lib: Lib, n: i32, x: *f64, incx: i32) -> i32 = lib match
         Accelerate -> c_idamax(n, x, incx)
         OpenBLAS -> ob_idamax(n, x, incx)
+    o_gemv(lib: Lib, trans: bool, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32) = lib match
+        Accelerate -> c_dgemv(col_major, trans_code(trans), m, n, alpha, a, lda, x, incx, beta, y, incy)
+        OpenBLAS -> ob_dgemv(col_major, trans_code(trans), m, n, alpha, a, lda, x, incx, beta, y, incy)
+    o_ger(lib: Lib, m: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32) = lib match
+        Accelerate -> c_dger(col_major, m, n, alpha, x, incx, y, incy, a, lda)
+        OpenBLAS -> ob_dger(col_major, m, n, alpha, x, incx, y, incy, a, lda)
 
 impl Oracle for f32
     from_unit(u: f64) -> f32 = f32(u)
@@ -171,3 +200,9 @@ impl Oracle for f32
     o_iamax(lib: Lib, n: i32, x: *f32, incx: i32) -> i32 = lib match
         Accelerate -> c_isamax(n, x, incx)
         OpenBLAS -> ob_isamax(n, x, incx)
+    o_gemv(lib: Lib, trans: bool, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32) = lib match
+        Accelerate -> c_sgemv(col_major, trans_code(trans), m, n, alpha, a, lda, x, incx, beta, y, incy)
+        OpenBLAS -> ob_sgemv(col_major, trans_code(trans), m, n, alpha, a, lda, x, incx, beta, y, incy)
+    o_ger(lib: Lib, m: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32) = lib match
+        Accelerate -> c_sger(col_major, m, n, alpha, x, incx, y, incy, a, lda)
+        OpenBLAS -> ob_sger(col_major, m, n, alpha, x, incx, y, incy, a, lda)
