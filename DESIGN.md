@@ -93,7 +93,7 @@ feature; a body computes with them freely.
 
 | | AArch64 (32 q registers) | anything else (16) |
 |---|---|---|
-| MR x NR, f64 | 8 x 6 (4 vectors x 6 broadcasts, 24 accumulators) | 4 x 4 |
+| MR x NR, f64 | 8 x 6 (4 vectors x 6 lanes of B's row, 24 accumulators) | 4 x 4 |
 | MR x NR, f32 | 16 x 6 | 8 x 4 |
 | KC | 2 KB of depth: 256 f64, 512 f32 | same |
 | MC | 960 bytes of height: 120 f64, 240 f32 | same |
@@ -265,8 +265,9 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   The fix in sysl: `@unchecked` reaching a vector load and store (the reference's "every subscript
   written inside it" read to include them), or `load_unchecked`/`store_unchecked`. Its cost is
   measured by a C replica of the same kernel with and without the checks (`bench/README.md`). In
-  gemm's micro-kernel the four A-panel loads keep 22 of the inner loop's 88 instructions (two steps)
-  in checks (`micro` in `level3.sysl`).
+  gemm's micro-kernel the A-panel and B-panel vector loads keep 40 of the f64 inner loop's 101
+  instructions (two steps) in checks, and 34 of f32's 95 (`micro` in `level3.sysl`); without them a
+  step is 30.5 instructions at both widths.
 - **F2: no lane-wise absolute value** (`type '<2>real' has no method 'abs'`; sysl 0.8.1 adds it).
   `asum`, `nrm2` and `iamax` are scalar walks because of it: `asum` and `iamax` need `|v|`, and
   `nrm2`'s band test is `|v| > t`. The longhands — `(v < 0).select(-v, v)`, or `(v > t) | (v < -t)` —
@@ -280,18 +281,13 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   own.** The stated reason — a trait answering differently in tests and in the shipped program — does
   not arise for a trait that exists only in tests. This is why the oracle trait lives in the `oracle/`
   project, which turned out to be the better structure anyway.
-- **F3: a lane cannot be read by the variable of a loop over a constant range.** The micro-kernel
-  wants B's row as `ceil(NR / V)` vector loads with each lane fed to `fmla` by element
-  (`fmla.2d v, a, b.d[1]`, as OpenBLAS does), generically over the tile: `val bv: <NR>T =
-  bp.load(p * NR)` then `for j in 0..<NR` reading `bv[j]`. Refused: *a lane index is part of the
-  instruction that reads it, so it has to be a constant — a literal, or a 'const' naming one*, even
-  though `NR` is a `const` parameter and LLVM unrolls the loop completely; `val arr: [N]f64 = v` is
-  refused too (*declared […]f64 but the value is <N>f64*), so there is no way back to a subscriptable
-  array. The longhand — six lines `acc[0][v] = a[v] * bv[0] + …` under `#if aarch64`, a second copy
-  for NR = 4 — was measured and not shipped: it takes the step from 47 to 46 instructions now (5
-  scalar loads and a `mov` become `ldp q` + `ldr q`, but gain F1's three-instruction check), and
-  would take it from 36 to 32 once F1 is fixed. Wanted: a compile-time-unrolled `for` over a
-  constant range whose variable counts as a constant, or a vector-to-array conversion.
+- **Not a gap: reading a lane by a loop's variable.** A lane index must be a constant, and the
+  variable of a `for const` over a constant range is one, so the micro-kernel reads B's row as
+  vectors and feeds each lane to `fmla` by element (`fmla.2d v, a, b.d[1]`, as OpenBLAS does) with
+  `for const jv in 0..<NR / V` and `for const l in 0..<V`, generically over the tile. What was
+  missing is a vector-to-array conversion (`val arr: [N]f64 = v` is refused in sysl 0.8.0, *declared
+  […]f64 but the value is <N>f64*); sysl 0.8.1 makes it implicit at an assignment, an argument and a
+  return, where the element type and the length agree.
 - **F4: no prefetch.** Nothing in `docs/content/reference/` or the library names one (`sysl.hint` has
   only `black_box`; `import sysl.mem.prefetch` → *no module is called 'sysl.mem.prefetch'*).
   OpenBLAS's dgemm kernel issues `prfm PLDL1KEEP` ahead in both panels; gemm has none. Wanted:

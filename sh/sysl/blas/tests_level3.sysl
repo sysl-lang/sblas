@@ -116,6 +116,49 @@ gemm_depths_f64()
 gemm_depths_f32()
     depths[f32](22)
 
+/** The micro-kernel alone at one tile, against the definition: panels exactly `kc` steps long, so the
+ * last step's vector loads of B end at the panel's last element, and a tile seeded with NaN, which
+ * every element must overwrite.
+ */
+private check_micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usize, seed: u64)
+    var g = Gen(seed)
+    val mr = V * MV
+    val ap = filled[T](kc * mr, &g)
+    val bp = filled[T](kc * NR, &g)
+    val tile: Buf[T] = buf_filled(mr * NR, T.zero() / T.zero())
+    micro[T, V, MV, NR](kc, ap.view(), bp.view(), tile.view())
+    for j in 0..<NR
+        for i in 0..<mr
+            var s = T.zero()
+            for p in 0..<kc
+                s = s + ap[p * mr + i] * bp[p * NR + j]
+            assert(tile[j * mr + i] == s, "the micro-kernel differs from its definition")
+
+/** Every tile shape a target uses — AArch64's f64 8x6 and f32 16x6 (NR not a multiple of V, so the last
+ * vector of B's row overlaps the one before it) and the fallback's f64 4x4 and f32 8x4 — plus an NR
+ * one short of and one past a multiple of V, one of exactly V, and one of nine (two or more whole
+ * vectors at both widths), at depths either side of the two-step unroll.
+ */
+private micro_shapes[T: Real, const V: usize](seed: u64)
+    val depths: [5]usize = [1, 2, 3, 4, 7]
+    var s = seed
+    for kc in depths
+        check_micro[T, V, 4, 6](kc, s)
+        check_micro[T, V, 2, 4](kc, s + 1)
+        check_micro[T, V, 1, 5](kc, s + 2)
+        check_micro[T, V, 2, 7](kc, s + 3)
+        check_micro[T, V, 1, V](kc, s + 4)
+        check_micro[T, V, 1, 9](kc, s + 5)
+        s += 6
+
+@test("gemm's micro-kernel is right at every tile shape a target uses, f64")
+gemm_micro_f64()
+    micro_shapes[f64, 2](31)
+
+@test("gemm's micro-kernel is right at every tile shape a target uses, f32")
+gemm_micro_f32()
+    micro_shapes[f32, 4](32)
+
 @test("gemm agrees with its definition across every blocking boundary, f64")
 gemm_sizes_f64()
     sweep[f64](11)

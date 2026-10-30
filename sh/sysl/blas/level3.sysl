@@ -23,11 +23,12 @@ import sysl.math.{min, max}
 /** Bytes in one vector register: a NEON or SSE `q` register. */
 private const vector_bytes: usize = 16
 
-// The tile, per target. MR is `tile_vectors` vectors of A's column, NR is `tile_cols` broadcasts of
-// B's row, and the accumulators take `tile_vectors * tile_cols` registers. KC and MC are in bytes so
-// that both widths keep the same panel footprint: an f32 panel is twice as deep and twice as tall.
+// The tile, per target. MR is `tile_vectors` vectors of A's column, NR is `tile_cols` lanes of B's
+// row (at least one vector's worth), and the accumulators take `tile_vectors * tile_cols` registers.
+// KC and MC are in bytes so that both widths keep the same panel footprint: an f32 panel is twice as
+// deep and twice as tall.
 #if aarch64
-// 32 vector registers: 24 accumulators, 4 for A's column, the rest for B's broadcasts. f64 8x6 and
+// 32 vector registers: 24 accumulators, 4 for A's column, the rest for B's row. f64 8x6 and
 // f32 16x6 — the shape of BLIS's armv8a kernels (dgemm 6x8, accumulating along C's rows) turned to
 // accumulate along C's columns, which are contiguous here.
 private const tile_vectors: usize = 4
@@ -100,7 +101,7 @@ private pack_a[T: Real, const V: usize, const MR: usize](a: Matrix[T], i0: usize
             if mr == MR && rs == 1
                 for p in 0..<kc
                     val col = base + p * cs
-                    for v in 0..<MR / V
+                    for const v in 0..<MR / V
                         val x: <V>T = a.data.load(col + v * V)
                         out.store(at + v * V, x)
                     at += MR
@@ -146,35 +147,51 @@ private pack_b[T: Real, const NR: usize](b: Matrix[T], p0: usize, kc: usize, j0:
 private const k_unroll: usize = 2
 
 /** `tile := A~ * B~` for one MR x NR tile, MR being `MV` vectors of `V` lanes: `kc` rank-1 updates, each
- * a column of the A panel (`MV` loads) times each of NR elements of the B panel's row (a broadcast
- * and `MV` fused multiply-adds). The tile is written column-major, MR elements to a column.
+ * a column of the A panel (`MV` loads) times the B panel's row. The row is read as whole vectors, and
+ * each of its NR elements feeds `MV` fused multiply-adds as a lane of one, so no element is loaded on
+ * its own. Where NR is not a multiple of V, the last vector is the row's last V elements (NR is at
+ * least V on every target), of which only the lanes past the whole vectors are used. Every index is a
+ * `for const`, so each lane, column and accumulator is fixed at compile time. The tile is written
+ * column-major, MR elements to a column.
  */
-private micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usize, ap: []const T, bp: []const T, tile: []T)
+private[blas] micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usize, ap: []const T, bp: []const T, tile: []T)
     var acc: [NR][MV]<V>T
     var a: [MV]<V>T
     @unchecked
         for q in 0..<kc / k_unroll
-            for u in 0..<k_unroll
+            for const u in 0..<k_unroll
                 val p = q * k_unroll + u
                 val ao = p * V * MV
-                for v in 0..<MV
+                for const v in 0..<MV
                     a[v] = ap.load(ao + v * V)
                 val bo = p * NR
-                for j in 0..<NR
-                    val b = bp[bo + j]
-                    for v in 0..<MV
-                        acc[j][v] = a[v] * b + acc[j][v]
+                for const jv in 0..<NR / V
+                    val b: <V>T = bp.load(bo + jv * V)
+                    for const l in 0..<V
+                        for const v in 0..<MV
+                            acc[jv * V + l][v] = a[v] * b[l] + acc[jv * V + l][v]
+                if const NR % V != 0
+                    val b: <V>T = bp.load(bo + NR - V)
+                    for const l in V - NR % V..<V
+                        for const v in 0..<MV
+                            acc[NR - V + l][v] = a[v] * b[l] + acc[NR - V + l][v]
         for p in kc / k_unroll * k_unroll..<kc
             val ao = p * V * MV
-            for v in 0..<MV
+            for const v in 0..<MV
                 a[v] = ap.load(ao + v * V)
             val bo = p * NR
-            for j in 0..<NR
-                val b = bp[bo + j]
-                for v in 0..<MV
-                    acc[j][v] = a[v] * b + acc[j][v]
-    for j in 0..<NR
-        for v in 0..<MV
+            for const jv in 0..<NR / V
+                val b: <V>T = bp.load(bo + jv * V)
+                for const l in 0..<V
+                    for const v in 0..<MV
+                        acc[jv * V + l][v] = a[v] * b[l] + acc[jv * V + l][v]
+            if const NR % V != 0
+                val b: <V>T = bp.load(bo + NR - V)
+                for const l in V - NR % V..<V
+                    for const v in 0..<MV
+                        acc[NR - V + l][v] = a[v] * b[l] + acc[NR - V + l][v]
+    for const j in 0..<NR
+        for const v in 0..<MV
             tile.store((j * MV + v) * V, acc[j][v])
 
 /** Adds the `mr` x `nr` corner of `tile` into C at (`i0`, `j0`): `c := alpha * tile + beta * c`, where

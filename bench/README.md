@@ -105,26 +105,26 @@ What the numbers say:
 ## gemm: Apple M5 Pro, sysl 0.8.0, OpenBLAS 0.3.34, 2026-10-29
 
 `./bench gemm`: square column-major `C += A * B`, GFLOPS (2n³ per call), median of seven
-interleaved trials of about 4e9 flops, single-threaded, load average 9.6 (1 min) at start, 8.8 at
+interleaved trials of about 4e9 flops, single-threaded, load average 8.9 (1 min) at start, 8.2 at
 the end. sysl's packing buffers are allocated once outside the timing.
 
 | type | routine | n | sysl | Accelerate | OpenBLAS | % Acc | % OB |
 |---|---|---|---:|---:|---:|---:|---:|
-| f64 | gemm | 64 | 50.4 | 206.9 | 25.4 | 24 | 199 |
-| f64 | gemm | 128 | 55.4 | 297.2 | 44.6 | 19 | 124 |
-| f64 | gemm | 256 | 59.7 | 367.4 | 54.8 | 16 | 109 |
-| f64 | gemm | 512 | 59.3 | 372.2 | 58.3 | 16 | 102 |
-| f64 | gemm | 1024 | 61.6 | 329.2 | 59.6 | 19 | 103 |
-| f64 | gemm | 2048 | 61.9 | 399.3 | 60.1 | 16 | 103 |
-| f32 | gemm | 64 | 97.0 | 699.8 | 112.1 | 14 | 87 |
-| f32 | gemm | 128 | 109.4 | 872.1 | 115.8 | 13 | 94 |
-| f32 | gemm | 256 | 118.4 | 1204.8 | 117.4 | 10 | 101 |
-| f32 | gemm | 512 | 123.9 | 1421.8 | 119.8 | 9 | 103 |
-| f32 | gemm | 1024 | 123.7 | 1483.1 | 119.7 | 8 | 103 |
-| f32 | gemm | 2048 | 125.7 | 1530.6 | 120.1 | 8 | 105 |
+| f64 | gemm | 64 | 51.4 | 204.5 | 25.5 | 25 | 202 |
+| f64 | gemm | 128 | 55.9 | 293.5 | 43.6 | 19 | 128 |
+| f64 | gemm | 256 | 60.4 | 315.7 | 54.4 | 19 | 111 |
+| f64 | gemm | 512 | 59.7 | 344.3 | 58.2 | 17 | 102 |
+| f64 | gemm | 1024 | 61.0 | 200.0 | 59.2 | 30 | 103 |
+| f64 | gemm | 2048 | 61.4 | 374.2 | 59.4 | 16 | 104 |
+| f32 | gemm | 64 | 97.3 | 678.9 | 111.4 | 14 | 87 |
+| f32 | gemm | 128 | 110.6 | 866.1 | 114.9 | 13 | 96 |
+| f32 | gemm | 256 | 119.0 | 1190.9 | 116.5 | 10 | 102 |
+| f32 | gemm | 512 | 124.4 | 1303.5 | 118.2 | 10 | 105 |
+| f32 | gemm | 1024 | 123.3 | 1406.3 | 119.1 | 9 | 104 |
+| f32 | gemm | 2048 | 126.7 | 1455.8 | 119.3 | 9 | 106 |
 
-- **101–105% of OpenBLAS from n = 256 up, at both widths**; ahead of it at small f64 sizes, where
-  OpenBLAS's own setup dominates, and 87–94% of it at small f32 sizes. Accelerate is SME (8–24%),
+- **102–111% of OpenBLAS from n = 256 up, at both widths**; ahead of it at small f64 sizes, where
+  OpenBLAS's own setup dominates, and 87–96% of it at small f32 sizes. Accelerate is SME (8–24%),
   out of scope as the target. The untuned structure was 93–97% from n = 512 up (55.6 / 115.4 GFLOPS
   at n = 2048).
 - **What the tuning changed, measured one change at a time** (n = 2048, f64 / f32): the k loop taking
@@ -134,7 +134,10 @@ the end. sysl's packing buffers are allocated once outside the timing.
   n = 64–128, nothing measurable above. Kept out: writing a full tile straight from the accumulators
   to C (within noise at every size), and passing the panels as offsets instead of sub-slices (the
   reference counts stay; DESIGN.md).
-- **What is left in the inner loop**: of 88 instructions per two steps, 48 are `fmla` by element and
-  22 are the A loads' run checks (F1, gone in sysl 0.8.1). B's row is still five scalar loads and a
-  `mov` a step where two vector loads would do (F3), and there is no `prfm` ahead in either panel
-  (F4); packing B stays a scalar gather.
+- **B's row read as vectors** (`for const` over its lanes) against six scalar loads and a `mov` a
+  step: +1–3% at both widths and every size, measured back to back. The loop takes more instructions
+  per two steps (f64 101, f32 95, was 88), all of them run checks on the extra vector loads; the
+  rest fall from 32.5 to 30.5 a step.
+- **What is left in the inner loop**: of 101 instructions per two steps (f64), 48 are `fmla` by
+  element and 40 are the vector loads' run checks (F1, gone in sysl 0.8.1). There is no `prfm`
+  ahead in either panel (F4); packing B stays a scalar gather.
