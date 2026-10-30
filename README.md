@@ -60,11 +60,11 @@ trsm(Side.Left, Uplo.Upper, Diag.NonUnit, 1.0, matrix(l[..], 2, 2, 2).t(), matri
 
 ```
 dependencies {
-  blas { git = "github.com/sysl-lang/blas", version = "0.1.0" }
+  blas { git = "github.com/sysl-lang/blas", version = "0.2.0" }
 }
 ```
 
-Needs sysl 0.8.1.
+Needs sysl 0.8.2.
 
 ## Layout
 
