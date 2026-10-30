@@ -55,7 +55,7 @@ Needs sysl 0.8.0.
 | `sh/sysl/blas/` | the package, and its tests against the definitions (`nrm2`'s range, `rotg`'s signs, `iamax`'s ties, `gemm` at every blocking boundary) |
 | `sh/sysl/blas/heap/` | `gemm_alloc`: gemm with its packing buffers allocated per call |
 | `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign |
-| `bench/` | GB/s of every contiguous routine, and gemm's GFLOPS (`sysl run . -- gemm`), against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
+| `bench/` | GB/s of every contiguous routine, and gemm's GFLOPS (`./bench gemm`), against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
 
 ## Speed
 

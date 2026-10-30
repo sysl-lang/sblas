@@ -219,7 +219,9 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   and 8 `fmla.2d`; OpenBLAS's `daxpy` loop has none, and unrolls 32 elements with `prfm` 0x380 ahead.
   The fix in sysl: `@unchecked` reaching a vector load and store (the reference's "every subscript
   written inside it" read to include them), or `load_unchecked`/`store_unchecked`. Its cost is
-  measured by a C replica of the same kernel with and without the checks (`bench/README.md`).
+  measured by a C replica of the same kernel with and without the checks (`bench/README.md`). In
+  gemm's micro-kernel the four A-panel loads keep 11 of the inner loop's 47 instructions in checks
+  (`micro` in `level3.sysl`), one of the named causes of its 93–97% of OpenBLAS.
 - **F2: no lane-wise absolute value** (`type '<2>real' has no method 'abs'`; sysl 0.8.1 adds it).
   `asum`, `nrm2` and `iamax` are scalar walks because of it: `asum` and `iamax` need `|v|`, and
   `nrm2`'s band test is `|v| > t`. The longhands — `(v < 0).select(-v, v)`, or `(v > t) | (v < -t)` —

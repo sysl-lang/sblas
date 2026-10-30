@@ -10,7 +10,10 @@ of about 1e8 elements.
 cd bench
 sysl build . -o bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench
+caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench gemm
 ```
+
+With `gemm` it times gemm alone instead: square sizes 64 to 2048, GFLOPS.
 
 OpenBLAS is loaded at run time from `$SYSL_OPENBLAS`, else Homebrew's
 `/opt/homebrew/opt/openblas/lib/libopenblas.dylib`, and pinned to one thread
@@ -95,3 +98,39 @@ What the numbers say:
   `dot` and `axpy` kernels with and without the two compare-and-branch pairs per step ran at
   100–101% at 1024 and 262144 elements. The checks stay a finding for smaller cores and for the
   micro-kernel, not a cost on this one.
+
+## gemm: Apple M5 Pro, sysl 0.8.0, OpenBLAS 0.3.34, 2026-10-29
+
+`./bench gemm`: square column-major `C += A * B`, GFLOPS (2n³ per call), median of seven
+interleaved trials of about 4e9 flops, single-threaded, load average 7.1 (1 min) at start and end.
+sysl's packing buffers are allocated once outside the timing. This is the untuned blocked structure.
+
+| type | routine | n | sysl | Accelerate | OpenBLAS | % Acc | % OB |
+|---|---|---|---:|---:|---:|---:|---:|
+| f64 | gemm | 64 | 45.7 | 204.4 | 25.6 | 22 | 179 |
+| f64 | gemm | 128 | 49.5 | 296.2 | 44.2 | 17 | 112 |
+| f64 | gemm | 256 | 54.4 | 350.6 | 54.5 | 16 | 100 |
+| f64 | gemm | 512 | 55.4 | 382.9 | 59.2 | 14 | 94 |
+| f64 | gemm | 1024 | 55.1 | 241.3 | 59.2 | 23 | 93 |
+| f64 | gemm | 2048 | 55.6 | 368.8 | 59.6 | 15 | 93 |
+| f32 | gemm | 64 | 90.5 | 688.4 | 111.2 | 13 | 81 |
+| f32 | gemm | 128 | 100.4 | 861.1 | 114.8 | 12 | 87 |
+| f32 | gemm | 256 | 108.3 | 1199.4 | 114.7 | 9 | 94 |
+| f32 | gemm | 512 | 113.3 | 1388.5 | 119.1 | 8 | 95 |
+| f32 | gemm | 1024 | 113.5 | 1465.9 | 119.7 | 8 | 95 |
+| f32 | gemm | 2048 | 115.4 | 1403.1 | 118.6 | 8 | 97 |
+
+- **93–97% of OpenBLAS from n = 512 up, at both widths**; ahead of it at small f64 sizes, where
+  OpenBLAS's own setup dominates. Accelerate is SME (8–23%), out of scope as the target.
+- **The micro-kernel's inner loop** (one k step, from the bench binary's disassembly; f32 has the same
+  shape with `.4s`): 47 instructions — 24 `fmla` by element, 2 `ldp q` for A's four vectors, 5 scalar
+  loads (`ldp d`, `ldur d`, `ld1r`, 2 `ldr d`) plus a `mov` for B's six values, 4 `cmp` + `b.hi` + 3
+  `add` that are the four A loads' run checks (F1; 11 of 47), and 3 for the loop. The accumulators
+  stay in v0–v31 with **no spills**, and `a * b + c` did contract to `fmla`.
+- **The likely causes of the shortfall, for the tuning item**: (1) F1's 11 instructions per step —
+  removable when `@unchecked` reaches a vector load (0.8.1); (2) B read as six scalars instead of
+  three `ldr q` used by lane (`fmla.2d v, a, b.d[1]`); (3) no unrolling of the k loop and no `prfm`
+  ahead in A and B, both of which OpenBLAS's kernel has; (4) per tile, the 24 accumulators go to a
+  stack tile and back (24 stores, then the write-back reloads them, branching on `beta`), and the
+  panel sub-slices take and drop an ARC reference each (`ldr`/`add`/`str` pairs); (5) packing is a
+  scalar element copy. (1)–(3) are per k step and so the large-n cost; (4)–(5) weigh at small n.
