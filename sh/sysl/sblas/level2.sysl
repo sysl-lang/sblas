@@ -12,6 +12,12 @@ module sh.sysl.sblas
 // panel at a time, small enough to stay in L1 while every column (or row) of the matrix streams by.
 // `ger` is a column axpy either way, run over the transpose when the rows are the contiguous side.
 //
+// The symmetric routines read or write one triangle. `symv` reads each element of it once, for two
+// uses: a column of the triangle is added into `y` (the product by that column) and dotted with `x`
+// (the product by the row of the other triangle it mirrors), four columns per pass. `syr2` is two
+// axpys into each column's part of the triangle in one pass. A triangle whose rows are contiguous is
+// the other triangle of the transpose, whose columns are, and a symmetric matrix is its own transpose.
+//
 // The contiguous paths also need the vector they run along to be contiguous (stride 1); a matrix of
 // general strides, or a vector of any other stride, takes the walk, which follows every stride and
 // reads and writes `@unchecked` after checking once that the matrix and both vectors are inside
@@ -157,6 +163,147 @@ private ger_cols[T: Real](alpha: T, x: []const T, y: Strided[T], a: MatrixMut[T]
             axpy_kernel[T, block_bytes / sizeof(T)](alpha * y.at(j), xp, a.data[b..<b + h])
         i0 += h
 
+/** One pass of four columns of a symmetric matrix past `x` and `y`: `y += c0 * t0 + … + c3 * t3`, added
+ * in that order, and the dot product of each column with `x`, sharing every load of `x` and `y`.
+ */
+private sym4_kernel[T: Real, const V: usize](c0: []const T, c1: []const T, c2: []const T, c3: []const T, t0: T, t1: T, t2: T, t3: T, x: []const T, y: []T) -> (T, T, T, T)
+    runs(y.len, x.len)
+    runs(y.len, c0.len)
+    runs(y.len, c1.len)
+    runs(y.len, c2.len)
+    runs(y.len, c3.len)
+    var s0: <V>T = T.zero()
+    var s1: <V>T = T.zero()
+    var s2: <V>T = T.zero()
+    var s3: <V>T = T.zero()
+    var i: usize = 0
+    @unchecked
+        while i + V <= y.len
+            val xv: <V>T = x.load(i)
+            var yv: <V>T = y.load(i)
+            val a0: <V>T = c0.load(i)
+            yv = a0.mul_add(t0, yv)
+            s0 = a0.mul_add(xv, s0)
+            val a1: <V>T = c1.load(i)
+            yv = a1.mul_add(t1, yv)
+            s1 = a1.mul_add(xv, s1)
+            val a2: <V>T = c2.load(i)
+            yv = a2.mul_add(t2, yv)
+            s2 = a2.mul_add(xv, s2)
+            val a3: <V>T = c3.load(i)
+            yv = a3.mul_add(t3, yv)
+            s3 = a3.mul_add(xv, s3)
+            y.store(i, yv)
+            i += V
+        var d0 = s0.sum()
+        var d1 = s1.sum()
+        var d2 = s2.sum()
+        var d3 = s3.sum()
+        while i < y.len
+            val xi = x[i]
+            var v = y[i]
+            v = c0[i] * t0 + v
+            d0 = c0[i] * xi + d0
+            v = c1[i] * t1 + v
+            d1 = c1[i] * xi + d1
+            v = c2[i] * t2 + v
+            d2 = c2[i] * xi + d2
+            v = c3[i] * t3 + v
+            d3 = c3[i] * xi + d3
+            y[i] = v
+            i += 1
+        (d0, d1, d2, d3)
+
+/** One column `j` of `symv` by the reference's loop: the part of the column off the diagonal in the
+ * stored triangle is added into `y` times `alpha x[j]` and dotted with `x`, and the diagonal and that
+ * dot product times `alpha` go to `y[j]`.
+ */
+private symv_col[T: Real](lower: bool, alpha: T, a: Matrix[T], x: []const T, y: []T, j: usize)
+    val n = a.rows
+    val ld = a.col_stride
+    val t = alpha * x[j]
+    var s = T.zero()
+    val (lo, hi) = if lower then (j + 1, n) else (0, j)
+    @unchecked
+        for i in lo..<hi
+            val aij = a.data[i + j * ld]
+            y[i] = aij * t + y[i]
+            s = aij * x[i] + s
+        y[j] = a.data[j + j * ld] * t + y[j]
+        y[j] = s * alpha + y[j]
+
+/** `y += alpha * a * x` for a symmetric `a` whose columns are contiguous, reading only its `lower` (or
+ * upper) triangle, into a contiguous `y`.
+ *
+ * Every element of the triangle is read once, for two uses: column `j` below (above) the diagonal is
+ * added into `y` times `x[j]`, and dotted with `x` for `y[j]`, which is the row of the other triangle
+ * it mirrors. Four columns go together, so `x` and `y` are loaded and `y` stored once for four of
+ * them. The four by four block on their diagonal is done by `symv_col`'s loop. The columns left over
+ * are the last ones of a lower triangle, or the first of an upper one, where the column's part off the
+ * diagonal is at most three long.
+ */
+private symv_cols[T: Real](lower: bool, alpha: T, a: Matrix[T], x: []const T, y: []T)
+    val n = a.rows
+    val ld = a.col_stride
+    val r = n % 4
+    if !lower
+        for j in 0..<r
+            symv_col(lower, alpha, a, x, y, j)
+    var j: usize = if lower then 0 else r
+    while j + 4 <= n
+        val t0 = alpha * x[j]
+        val t1 = alpha * x[j + 1]
+        val t2 = alpha * x[j + 2]
+        val t3 = alpha * x[j + 3]
+        val (lo, hi) = if lower then (j + 4, n) else (0, j)
+        val b = j * ld
+        val (d0, d1, d2, d3) = sym4_kernel[T, dot4_bytes / sizeof(T)](a.data[b + lo..<b + hi], a.data[b + ld + lo..<b + ld + hi], a.data[b + 2 * ld + lo..<b + 2 * ld + hi], a.data[b + 3 * ld + lo..<b + 3 * ld + hi], t0, t1, t2, t3, x[lo..<hi], y[lo..<hi])
+        // The diagonal block: column j + q's elements in rows j ..< j + 4 inside the triangle.
+        var s: [4]T = [d0, d1, d2, d3]
+        val t: [4]T = [t0, t1, t2, t3]
+        for q in 0..<4
+            val col = (j + q) * ld
+            val (rlo, rhi) = if lower then (q + 1, 4) else (0, q)
+            for p in rlo..<rhi
+                val aij = a.data[col + j + p]
+                y[j + p] = aij * t[q] + y[j + p]
+                s[q] = aij * x[j + p] + s[q]
+            y[j + q] = a.data[col + j + q] * t[q] + y[j + q]
+        for q in 0..<4
+            y[j + q] = s[q] * alpha + y[j + q]
+        j += 4
+    if lower
+        while j < n
+            symv_col(lower, alpha, a, x, y, j)
+            j += 1
+
+/** `a += alpha * (x * yᵀ + y * xᵀ)` on the `lower` (or upper) triangle of an `a` whose columns are
+ * contiguous, from contiguous `x` and `y`: each column's part in the triangle is two axpys in one pass.
+ */
+private syr2_cols[T: Real](lower: bool, alpha: T, x: []const T, y: []const T, a: MatrixMut[T])
+    val n = a.rows
+    val ld = a.col_stride
+    for j in 0..<n
+        val (lo, hi) = if lower then (j, n) else (0, j + 1)
+        val b = j * ld
+        axpy2_kernel[T, block_bytes / sizeof(T)](alpha * y[j], x[lo..<hi], alpha * x[j], y[lo..<hi], a.data[b + lo..<b + hi])
+
+/** `a := a + x * s + y * t`, added in that order. */
+private axpy2_kernel[T: Real, const W: usize](s: T, x: []const T, t: T, y: []const T, a: []T)
+    runs(a.len, x.len)
+    runs(a.len, y.len)
+    var i: usize = 0
+    @unchecked
+        while i + W <= a.len
+            val xv: <W>T = x.load(i)
+            val yv: <W>T = y.load(i)
+            val v = xv.mul_add(s, a.load(i))
+            a.store(i, yv.mul_add(t, v))
+            i += W
+        while i < a.len
+            a[i] = y[i] * t + (x[i] * s + a[i])
+            i += 1
+
 // --- Walks ----------------------------------------------------------------------------------------
 
 /** `y := beta * y`, where a zero `beta` writes zeros without reading `y`. */
@@ -214,6 +361,42 @@ private ger_walk[T: Real](alpha: T, x: Strided[T], y: Strided[T], a: MatrixMut[T
                 ix += x.inc
             jy += y.inc
 
+/** `y += alpha * a * x` for a symmetric `a` held in its `lower` (or upper) triangle, a column at a time
+ * by the reference's loop, following every stride.
+ */
+private symv_walk[T: Real](lower: bool, alpha: T, a: Matrix[T], x: Strided[T], y: StridedMut[T])
+    val n = a.rows
+    val x0 = x.first()
+    val y0 = y.first()
+    @unchecked
+        for j in 0..<n
+            val xj = x.data[usize(x0 + int(j) * x.inc)]
+            val t = alpha * xj
+            var s = T.zero()
+            val (lo, hi) = if lower then (j + 1, n) else (0, j)
+            for i in lo..<hi
+                val aij = a.data[i * a.row_stride + j * a.col_stride]
+                val iy = usize(y0 + int(i) * y.inc)
+                y.data[iy] = aij * t + y.data[iy]
+                s = aij * x.data[usize(x0 + int(i) * x.inc)] + s
+            val jy = usize(y0 + int(j) * y.inc)
+            y.data[jy] = a.data[j * a.row_stride + j * a.col_stride] * t + y.data[jy]
+            y.data[jy] = s * alpha + y.data[jy]
+
+/** `a += alpha * (x * yᵀ + y * xᵀ)` on the `lower` (or upper) triangle, following every stride. */
+private syr2_walk[T: Real](lower: bool, alpha: T, x: Strided[T], y: Strided[T], a: MatrixMut[T])
+    val n = a.rows
+    val x0 = x.first()
+    val y0 = y.first()
+    @unchecked
+        for j in 0..<n
+            val s = alpha * y.data[usize(y0 + int(j) * y.inc)]
+            val t = alpha * x.data[usize(x0 + int(j) * x.inc)]
+            val (lo, hi) = if lower then (j, n) else (0, j + 1)
+            for i in lo..<hi
+                val at = i * a.row_stride + j * a.col_stride
+                a.data[at] = y.data[usize(y0 + int(i) * y.inc)] * t + (x.data[usize(x0 + int(i) * x.inc)] * s + a.data[at])
+
 // --- The routines ---------------------------------------------------------------------------------
 
 /** `y := alpha * a * x + beta * y`, BLAS's `gemv`; pass `a.t()` for `trans = 'T'`.
@@ -261,3 +444,55 @@ ger[T: Real](alpha: T, x: Strided[T], y: Strided[T], a: MatrixMut[T])
         ger_walk(alpha, x, y, a)
     else
         ger_walk(alpha, y, x, a.t())
+
+private square(rows: usize, cols: usize)
+    assert(rows == cols, "a symmetric matrix is not square")
+
+/** `y := alpha * a * x + beta * y` for a symmetric `a`, BLAS's `symv`, reading only the `uplo` triangle
+ * of `a` (the diagonal included); the other triangle is never touched, so it may hold anything.
+ *
+ * `a` is square and `x` and `y` have one element per row, or it traps. An empty matrix leaves `y` as it
+ * is; otherwise a zero `beta` sets `y` to zero without reading it, and a zero `alpha` only scales `y`,
+ * reading neither `a` nor `x`. Since `a` is symmetric, a triangle whose rows are contiguous is read as
+ * the other triangle of `a.t()`, whose columns are.
+ */
+symv[T: Real](uplo: Uplo, alpha: T, a: Matrix[T], x: Strided[T], beta: T, y: StridedMut[T])
+    square(a.rows, a.cols)
+    dim(a.cols, x.len)
+    dim(a.rows, y.len)
+    fits(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride)
+    walkable(x.data.len, x.len, x.inc)
+    walkable(y.data.len, y.len, y.inc)
+    if a.rows == 0 || (alpha == T.zero() && beta == T.one()) then return
+    scale_by(beta, y)
+    if alpha == T.zero() then return
+    val turn = a.row_stride != 1 && a.col_stride == 1
+    val m = if turn then a.t() else a
+    val lower = (uplo == Uplo.Lower) != turn
+    if m.row_stride == 1 && x.is_contiguous() && y.is_contiguous()
+        symv_cols(lower, alpha, m, x.data[0..<x.len], y.data[0..<y.len])
+    else
+        symv_walk(lower, alpha, m, x, y)
+
+/** `a := alpha * x * yᵀ + alpha * y * xᵀ + a` for a symmetric `a`, BLAS's `syr2`, on the `uplo` triangle
+ * of `a` only (the diagonal included); the other triangle is neither read nor written.
+ *
+ * `a` is square and `x` and `y` have one element per row, or it traps. An empty matrix or a zero
+ * `alpha` returns at once without reading anything. The update is symmetric, so a triangle whose rows
+ * are contiguous is updated as the other triangle of `a.t()`, whose columns are.
+ */
+syr2[T: Real](uplo: Uplo, alpha: T, x: Strided[T], y: Strided[T], a: MatrixMut[T])
+    square(a.rows, a.cols)
+    dim(a.rows, x.len)
+    dim(a.cols, y.len)
+    fits(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride)
+    walkable(x.data.len, x.len, x.inc)
+    walkable(y.data.len, y.len, y.inc)
+    if a.rows == 0 || alpha == T.zero() then return
+    val turn = a.row_stride != 1 && a.col_stride == 1
+    val m = if turn then a.t() else a
+    val lower = (uplo == Uplo.Lower) != turn
+    if m.row_stride == 1 && x.is_contiguous() && y.is_contiguous()
+        syr2_cols(lower, alpha, x.data[0..<x.len], y.data[0..<y.len], m)
+    else
+        syr2_walk(lower, alpha, x, y, m)

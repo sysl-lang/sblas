@@ -273,6 +273,71 @@ private bench_trsm[T: Oracle](name: string)
         val ob = median(rates[2][..])
         print(f"| ${name} | trsm | ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
+// --- syrk and trmm ---------------------------------------------------------------------------------
+//
+// Square column-major operands. syrk is `C -= A Aᵀ` on the lower triangle, the update a blocked
+// Cholesky makes; trmm is `B := A B` with A lower on the left, and `B := B A` with A upper on the right
+// (the shape of QR's block reflector). Each is n³ flops per call.
+
+enum Op3
+    Syrk
+    TrmmLeft
+    TrmmRight
+
+private val ops3: [3]Op3 = [Op3.Syrk, Op3.TrmmLeft, Op3.TrmmRight]
+
+impl Op3
+    name(self) -> string = self match
+        Syrk -> "syrk L N"
+        TrmmLeft -> "trmm L L"
+        TrmmRight -> "trmm R U"
+
+/** One call of `op` by implementation `who`, on an `a` and a `b` (C for syrk) of order `n`. */
+private once3[T: Oracle](op: Op3, who: usize, n: usize, a: []T, b: []T, pa: []T, pb: []T)
+    val one = T.one()
+    if who == 0
+        val w = GemmWork(pa, pb)
+        op match
+            Syrk -> syrk(Uplo.Lower, -one, matrix(a, n, n, n), one, matrix_mut(b, n, n, n), w)
+            TrmmLeft -> trmm(Side.Left, Uplo.Lower, Diag.NonUnit, one, matrix(a, n, n, n), matrix_mut(b, n, n, n), w)
+            TrmmRight -> trmm(Side.Right, Uplo.Upper, Diag.NonUnit, one, matrix(a, n, n, n), matrix_mut(b, n, n, n), w)
+        return
+    val lib = libs[who - 1]
+    val nn = i32(n)
+    op match
+        Syrk -> T.o_syrk(lib, false, false, nn, nn, -one, as_mut_ptr(a), nn, one, as_mut_ptr(b), nn)
+        TrmmLeft -> T.o_trmm(lib, false, false, false, false, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(b), nn)
+        TrmmRight -> T.o_trmm(lib, true, true, false, false, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(b), nn)
+
+private bench_l3sym[T: Oracle](name: string)
+    for op in ops3
+        for n in gemm_sizes
+            val a = fill[T](n * n)
+            val b0 = fill[T](n * n)
+            val b = fill[T](n * n)
+            val len = gemm_work_len[T](n, n, n)
+            val pa = fill[T](len.a)
+            val pb = fill[T](len.b)
+            val flops = f64(n) * f64(n) * f64(n)
+            val reps = int(gemm_work / flops) + 1
+            var rates: [3][trials]f64
+            for t in 0..<trials
+                for who in 0..<3
+                    val t0 = monotonic().us
+                    for _ in 0..<reps
+                        // Every repetition starts again from the same B (or C), so none works on
+                        // numbers grown or shrunk by the ones before it; the copy (n² of n³) is timed for
+                        // all three alike.
+                        for i in 0..<b.len()
+                            b[i] = b0[i]
+                        once3(op, who, n, black_box(a.view()), black_box(b.view()), pa.view(), pb.view())
+                    val dt = f64(monotonic().us - t0) * 1e-6
+                    rates[who][t] = flops * f64(reps) / dt * 1e-9
+            val ours = median(rates[0][..])
+            val acc = median(rates[1][..])
+            val ob = median(rates[2][..])
+            print(f"| ${name} | ${op.name()} | ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
+
 // --- Level 2 ---------------------------------------------------------------------------------------
 //
 // Square column-major matrices whose storage (at f64) fits L1, fits L2, and lives in main memory. The
@@ -284,14 +349,20 @@ enum Op2
     GemvN
     GemvT
     Ger
+    SymvL
+    SymvU
+    Syr2L
 
-private val ops2: [3]Op2 = [Op2.GemvN, Op2.GemvT, Op2.Ger]
+private val ops2: [6]Op2 = [Op2.GemvN, Op2.GemvT, Op2.Ger, Op2.SymvL, Op2.SymvU, Op2.Syr2L]
 
 impl Op2
     name(self) -> string = self match
         GemvN -> "gemv N"
         GemvT -> "gemv T"
         Ger -> "ger"
+        SymvL -> "symv L"
+        SymvU -> "symv U"
+        Syr2L -> "syr2 L"
 
 /** One call of `op` by implementation `who`. `ger` adds a tiny multiple, so `a` does not drift. */
 private once2[T: Oracle](op: Op2, who: usize, n: usize, a: []T, x: []T, y: []T)
@@ -302,6 +373,9 @@ private once2[T: Oracle](op: Op2, who: usize, n: usize, a: []T, x: []T, y: []T)
             GemvN -> gemv(one, matrix(a, n, n, n), view(x), one, view_mut(y))
             GemvT -> gemv(one, matrix(a, n, n, n).t(), view(x), one, view_mut(y))
             Ger -> ger(tiny, view(x), view(y), matrix_mut(a, n, n, n))
+            SymvL -> symv(Uplo.Lower, one, matrix(a, n, n, n), view(x), one, view_mut(y))
+            SymvU -> symv(Uplo.Upper, one, matrix(a, n, n, n), view(x), one, view_mut(y))
+            Syr2L -> syr2(Uplo.Lower, tiny, view(x), view(y), matrix_mut(a, n, n, n))
         return
     val lib = libs[who - 1]
     val nn = i32(n)
@@ -309,6 +383,9 @@ private once2[T: Oracle](op: Op2, who: usize, n: usize, a: []T, x: []T, y: []T)
         GemvN -> T.o_gemv(lib, false, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(x), 1, one, as_mut_ptr(y), 1)
         GemvT -> T.o_gemv(lib, true, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(x), 1, one, as_mut_ptr(y), 1)
         Ger -> T.o_ger(lib, nn, nn, tiny, as_mut_ptr(x), 1, as_mut_ptr(y), 1, as_mut_ptr(a), nn)
+        SymvL -> T.o_symv(lib, false, nn, one, as_mut_ptr(a), nn, as_mut_ptr(x), 1, one, as_mut_ptr(y), 1)
+        SymvU -> T.o_symv(lib, true, nn, one, as_mut_ptr(a), nn, as_mut_ptr(x), 1, one, as_mut_ptr(y), 1)
+        Syr2L -> T.o_syr2(lib, false, nn, tiny, as_mut_ptr(x), 1, as_mut_ptr(y), 1, as_mut_ptr(a), nn)
 
 private bench_level2[T: Oracle](name: string)
     for k in 0..<dims.len
@@ -334,7 +411,9 @@ private bench_level2[T: Oracle](name: string)
             val ob = median(rates[2][..])
             print(f"| ${name} | ${op.name()} | ${places[k]} ${n}x${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
-/** With no argument, Levels 1 and 2; with `gemm`, `gemm_par` or `trsm`, that routine alone. */
+/** With no argument, Levels 1 and 2; with `gemm`, `gemm_par` or `trsm`, that routine alone; with
+ * `l3sym`, syrk and trmm.
+ */
 main(args: []string)
     if args.len > 1 && args[1] == "gemm"
         print(f"GFLOPS, square column-major C += A * B, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
@@ -362,6 +441,13 @@ main(args: []string)
         print("|---|---|---|---:|---:|---:|---:|---:|")
         bench_trsm[f64]("f64")
         bench_trsm[f32]("f32")
+        return
+    if args.len > 1 && args[1] == "l3sym"
+        print(f"GFLOPS (n³ per call), square column-major, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
+        print("| type | routine | n | sysl | Accelerate | OpenBLAS | % Acc | % OB |")
+        print("|---|---|---|---:|---:|---:|---:|---:|")
+        bench_l3sym[f64]("f64")
+        bench_l3sym[f32]("f32")
         return
     print(f"GB/s, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
     print("| type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |")

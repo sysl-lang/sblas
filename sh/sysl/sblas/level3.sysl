@@ -277,6 +277,52 @@ private write_back[T: Real, const V: usize, const MR: usize](c: MatrixMut[T], i0
                     val at = col + i * rs
                     c.data[at] = alpha * tile[j * MR + i] + beta * c.data[at]
 
+/** `write_back` for a tile that the diagonal of a triangular C crosses: only the elements of the `lower`
+ * (or upper) triangle are written, and only they are read when `beta` is not zero.
+ */
+private write_back_tri[T: Real, const MR: usize](lower: bool, c: MatrixMut[T], i0: usize, j0: usize, mr: usize, nr: usize, tile: []const T, alpha: T, beta: T)
+    val rs = c.row_stride
+    val cs = c.col_stride
+    @unchecked
+        for j in 0..<nr
+            val d = j0 + j
+            // Rows i0 + i of column d inside the triangle: i0 + i >= d for lower, <= d for upper.
+            val (lo, hi) = if lower then (if d > i0 then min(d - i0, mr) else 0, mr) else (0, if d >= i0 then min(d - i0 + 1, mr) else 0)
+            val col = i0 * rs + d * cs
+            for i in lo..<hi
+                val at = col + i * rs
+                c.data[at] = if beta == T.zero() then alpha * tile[j * MR + i] else alpha * tile[j * MR + i] + beta * c.data[at]
+
+/** The triangle of C the five loops write: all of it for gemm, or syrk's lower or upper one. */
+private const tri_all: usize = 0
+private const tri_lower: usize = 1
+private const tri_upper: usize = 2
+
+/** Where the `rows` x `cols` block of C at (`i0`, `j0`) lies against triangle `tri`: 0 outside it, 1
+ * across its diagonal, 2 inside it. Everything is inside `tri_all`.
+ */
+private tri_part(tri: usize, i0: usize, rows: usize, j0: usize, cols: usize) -> usize
+    if tri == tri_all then return 2
+    if tri == tri_lower
+        if i0 + rows <= j0 then return 0
+        if i0 + 1 >= j0 + cols then return 2
+        return 1
+    if i0 >= j0 + cols then return 0
+    if i0 + rows <= j0 + 1 then return 2
+    1
+
+/** `c := beta * c` on the `lower` (or upper) triangle only, reading nothing when `beta` is zero and
+ * touching nothing when it is one.
+ */
+private scale_tri[T: Real](lower: bool, c: MatrixMut[T], beta: T)
+    if beta == T.one() then return
+    @unchecked
+        for j in 0..<c.cols
+            val (lo, hi) = if lower then (j, c.rows) else (0, j + 1)
+            for i in lo..<hi
+                val at = i * c.row_stride + j * c.col_stride
+                c.data[at] = if beta == T.zero() then T.zero() else beta * c.data[at]
+
 /** `c := beta * c`, reading nothing when `beta` is zero and touching nothing when it is one. */
 private scale_c[T: Real](c: MatrixMut[T], beta: T)
     if beta == T.one() then return
@@ -290,8 +336,12 @@ private scale_c[T: Real](c: MatrixMut[T], beta: T)
 
 /** The five loops at one tile: MR = `V * MV`, and `TILE` = MR * NR is passed on its own, since an
  * array's length may name a value parameter but not compute with one.
+ *
+ * `TRI` names the triangle of C written: `tri_all` for gemm, or syrk's. A block of A or a tile wholly
+ * outside the triangle is neither packed nor multiplied, and a tile the diagonal crosses is written
+ * back only inside it; elsewhere the loops are gemm's, and `TRI` being a constant folds the checks.
  */
-private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, const TILE: usize, const KC: usize, const MC: usize, const NC: usize](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, const TILE: usize, const KC: usize, const MC: usize, const NC: usize, const TRI: usize](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
     val m = c.rows
     val n = c.cols
     val k = a.cols
@@ -309,16 +359,24 @@ private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, 
             var ic: usize = 0
             while ic < m
                 val mcb = min(m - ic, MC)
-                pack_a[T, V, V * MV](a, ic, mcb, pc, kc, work.a)
-                var jr: usize = 0
-                while jr < ncb
-                    val bp = work.b[jr * kc..<(jr + NR) * kc]
-                    var ir: usize = 0
-                    while ir < mcb
-                        micro[T, V, MV, NR](kc, work.a[ir * kc..<(ir + V * MV) * kc], bp, tile[..])
-                        write_back[T, V, V * MV](c, ic + ir, jc + jr, min(mcb - ir, V * MV), min(ncb - jr, NR), tile[..], alpha, beta_here)
-                        ir += V * MV
-                    jr += NR
+                if tri_part(TRI, ic, mcb, jc, ncb) != 0
+                    pack_a[T, V, V * MV](a, ic, mcb, pc, kc, work.a)
+                    var jr: usize = 0
+                    while jr < ncb
+                        val bp = work.b[jr * kc..<(jr + NR) * kc]
+                        val nr = min(ncb - jr, NR)
+                        var ir: usize = 0
+                        while ir < mcb
+                            val mr = min(mcb - ir, V * MV)
+                            val part = tri_part(TRI, ic + ir, mr, jc + jr, nr)
+                            if part != 0
+                                micro[T, V, MV, NR](kc, work.a[ir * kc..<(ir + V * MV) * kc], bp, tile[..])
+                                if part == 2
+                                    write_back[T, V, V * MV](c, ic + ir, jc + jr, mr, nr, tile[..], alpha, beta_here)
+                                else
+                                    write_back_tri[T, V * MV](TRI == tri_lower, c, ic + ir, jc + jr, mr, nr, tile[..], alpha, beta_here)
+                            ir += V * MV
+                        jr += NR
                 ic += MC
             pc += KC
         jc += NC
@@ -341,7 +399,47 @@ gemm[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], wo
         return
     assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
     assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
-    gemm_blocked[T, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](alpha, a, b, beta, c, work)
+    gemm_at[T, tri_all](alpha, a, b, beta, c, work)
+
+/** The five loops at this target's tile and blocking, writing triangle `TRI` of C. */
+private gemm_at[T: Real, const TRI: usize](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+    gemm_blocked[T, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc, TRI](alpha, a, b, beta, c, work)
+
+// --- syrk ------------------------------------------------------------------------------------------
+//
+// syrk is gemm's five loops on `a` and `a.t()` writing one triangle of C: a block of A whose rows lie
+// wholly outside the triangle against the current panel of B is not packed, a tile wholly outside it
+// is not multiplied, and a tile on the diagonal is written back only inside it. So it does half of
+// gemm's flops at gemm's speed, and the other triangle of C is neither read nor written.
+
+/** The buffer sizes syrk needs for an `n` x `n` C and an `n` x `k` A. */
+syrk_work_len[T: Real](n: usize, k: usize) -> GemmWorkLen = gemm_work_len[T](n, n, k)
+
+/** `c := alpha * a * aᵀ + beta * c` on the `uplo` triangle of `c`, BLAS's `syrk`; pass `a.t()` for
+ * `trans = 'T'` (`c := alpha * aᵀ * a + beta * c`). It packs into the caller's `work`
+ * (`syrk_work_len` says how much).
+ *
+ * `c` is square and `a` has as many rows as `c`, or it traps. Only the `uplo` triangle of `c` (the
+ * diagonal included) is read or written; the other is left bit for bit. As in the reference BLAS, a
+ * `beta` of zero sets the triangle without reading it, and an `alpha` of zero or an `a` with no
+ * columns only scales the triangle by `beta`, reading nothing of `a`. Buffers shorter than
+ * `syrk_work_len` says trap, and so does a view built by hand that reaches past its data.
+ */
+syrk[T: Real](uplo: Uplo, alpha: T, a: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+    assert(c.rows == c.cols && a.rows == c.rows, "syrk's matrices do not agree in shape")
+    assert(holds(c.data.len, c.rows, c.cols, c.row_stride, c.col_stride), "a matrix reaches past the end of its data")
+    val need = syrk_work_len[T](c.rows, a.cols)
+    assert(work.a.len >= need.a && work.b.len >= need.b, "syrk's packing buffers are shorter than syrk_work_len says")
+    if c.rows == 0 then return
+    val lower = uplo == Uplo.Lower
+    if alpha == T.zero() || a.cols == 0
+        scale_tri(lower, c, beta)
+        return
+    assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
+    if lower
+        gemm_at[T, tri_lower](alpha, a, a.t(), beta, c, work)
+    else
+        gemm_at[T, tri_upper](alpha, a, a.t(), beta, c, work)
 
 // --- Threads ---------------------------------------------------------------------------------------
 //
@@ -655,3 +753,161 @@ trsm[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: Mat
     side match
         Left -> trsm_left(lower, unit, a, b, work)
         Right -> trsm_left(!lower, unit, a.t(), b.t(), work)
+
+// --- trmm ------------------------------------------------------------------------------------------
+//
+// trmm, `b := alpha * a * b` for a triangular `a`, is trsm's recursion run the other way. With A halved
+// as trsm halves it, a lower A gives `B₂ := A₂₂ B₂ + A₂₁ B₁` and `B₁ := A₁₁ B₁`: B₂ is multiplied first
+// (recursively), then takes `alpha A₂₁ B₁` from gemm while B₁ is still the caller's, and B₁ is
+// multiplied last. An upper A is the mirror, B₁ first. So nearly all of the flops are gemm's, and only
+// the `trsm_leaf`-row diagonal blocks are multiplied directly. The right side is the left on the
+// transposes, as for trsm.
+
+/** `b := alpha * a * b` in place, `a` being a triangle of at most `trsm_leaf` rows. A b whose rows are
+ * adjacent is multiplied a column at a time in registers (`multiply_leaf_columns`). Otherwise each row
+ * of the result is formed in place, in the order that reads only rows not yet overwritten — bottom up
+ * for a lower triangle, top down for an upper — along adjacent columns by vectors where there are any.
+ */
+private multiply_leaf[T: Real](lower: bool, unit: bool, alpha: T, a: Matrix[T], b: MatrixMut[T])
+    if b.row_stride == 1
+        if lower
+            multiply_leaf_columns[T, vector_bytes / sizeof(T), trsm_leaf * sizeof(T) / vector_bytes, true](unit, alpha, a, b)
+        else
+            multiply_leaf_columns[T, vector_bytes / sizeof(T), trsm_leaf * sizeof(T) / vector_bytes, false](unit, alpha, a, b)
+        return
+    val m = b.rows
+    val n = b.cols
+    val rs = b.row_stride
+    val cs = b.col_stride
+    val v = vector_bytes / sizeof(T)
+    for s in 0..<m
+        val i = if lower then m - 1 - s else s
+        val d = if unit then alpha else alpha * a.at(i, i)
+        val row = i * rs
+        val (lo, hi) = if lower then (0, i) else (i + 1, m)
+        @unchecked
+            for j in 0..<n
+                b.data[row + j * cs] = d * b.data[row + j * cs]
+        for p in lo..<hi
+            val f = alpha * a.at(i, p)
+            val src = p * rs
+            var j: usize = 0
+            @unchecked
+                if cs == 1
+                    while j + v <= n
+                        subtract_scaled[T, vector_bytes / sizeof(T)](b.data, row + j, src + j, -f)
+                        j += v
+                while j < n
+                    b.data[row + j * cs] = f * b.data[src + j * cs] + b.data[row + j * cs]
+                    j += 1
+
+/** The leaf multiply for a b whose rows are adjacent, a column at a time in registers.
+ *
+ * The triangle is first packed into `tri`, times `alpha`: column `p` holds `alpha a[i, p]` for every row
+ * `i` of the triangle — at and below the diagonal for a `LOWER` one, at and above it otherwise, the
+ * diagonal being `alpha` itself when it is `unit` — and zeros elsewhere, so the other triangle is never
+ * read, and nor are the rows past `m` of a leaf shorter than `trsm_leaf`. Each column of b is held as
+ * `trsm_leaf / V` vectors (a short one through a zero-padded copy), and the product is summed over
+ * columns `p` of `tri`: each whole vector of rows inside the triangle takes column `p` times `b[p]` in
+ * one fused multiply-add, and the rows of `p`'s own vector one lane at a time, only those inside the
+ * triangle, so an infinity in b reaches exactly the rows the reference product sends it to.
+ */
+private multiply_leaf_columns[T: Real, const V: usize, const W: usize, const LOWER: bool](unit: bool, alpha: T, a: Matrix[T], b: MatrixMut[T])
+    val m = b.rows
+    var tri: [trsm_leaf * trsm_leaf]T
+    for p in 0..<m
+        tri[p * trsm_leaf + p] = if unit then alpha else alpha * a.at(p, p)
+        val (lo, hi) = if LOWER then (p + 1, m) else (0, p)
+        for i in lo..<hi
+            tri[p * trsm_leaf + i] = alpha * a.at(i, p)
+    val cs = b.col_stride
+    @unchecked
+        for j in 0..<b.cols
+            val col = j * cs
+            var x: [W]<V>T
+            if m == trsm_leaf
+                for const w in 0..<W
+                    x[w] = b.data.load(col + w * V)
+            else
+                var t: [trsm_leaf]T
+                for i in 0..<m
+                    t[i] = b.data[col + i]
+                for const w in 0..<W
+                    x[w] = t.load(w * V)
+            var y: [W]<V>T
+            for const w in 0..<W
+                y[w] = T.zero()
+            for const p in 0..<trsm_leaf
+                const at = p / V
+                const lane = p % V
+                val xp = x[at][lane]
+                for const w in 0..<W
+                    if const (LOWER && w > at) || (!LOWER && w < at)
+                        val c: <V>T = tri.load(p * trsm_leaf + w * V)
+                        y[w] = c.mul_add(xp, y[w])
+                for const l in 0..<V
+                    if const (LOWER && l >= lane) || (!LOWER && l <= lane)
+                        y[at][l] = y[at][l] + tri[p * trsm_leaf + at * V + l] * xp
+            if m == trsm_leaf
+                for const w in 0..<W
+                    b.data.store(col + w * V, y[w])
+            else
+                var t: [trsm_leaf]T
+                for const w in 0..<W
+                    t.store(w * V, y[w])
+                for i in 0..<m
+                    b.data[col + i] = t[i]
+
+/** `b := alpha * a * b` for a triangular `a` of b's rows, recursively as the section's comment says. */
+private trmm_left[T: Real](lower: bool, unit: bool, alpha: T, a: Matrix[T], b: MatrixMut[T], work: GemmWork[T])
+    val m = b.rows
+    if m <= trsm_leaf
+        multiply_leaf(lower, unit, alpha, a, b)
+        return
+    val n = b.cols
+    val m1 = max(trsm_leaf, m / 2 / trsm_leaf * trsm_leaf)
+    val m2 = m - m1
+    val b1 = block_mut(b, 0, 0, m1, n)
+    val b2 = block_mut(b, m1, 0, m2, n)
+    if lower
+        trmm_left(lower, unit, alpha, block(a, m1, m1, m2, m2), b2, work)
+        gemm(alpha, block(a, m1, 0, m2, m1), b1.as_view(), T.one(), b2, work)
+        trmm_left(lower, unit, alpha, block(a, 0, 0, m1, m1), b1, work)
+    else
+        trmm_left(lower, unit, alpha, block(a, 0, 0, m1, m1), b1, work)
+        gemm(alpha, block(a, 0, m1, m1, m2), b2.as_view(), T.one(), b1, work)
+        trmm_left(lower, unit, alpha, block(a, m1, m1, m2, m2), b2, work)
+
+/** How many elements each of `GemmWork`'s two buffers needs for `trmm` on an `m` x `n` B: as for
+ * `trsm`, whose recursion trmm shares — nothing up to the leaf, and gemm's buffers past it.
+ */
+trmm_work_len[T: Real](side: Side, m: usize, n: usize) -> GemmWorkLen = trsm_work_len[T](side, m, n)
+
+/** Multiplies by a triangular matrix in place: `b := alpha * a * b` on the `Left`, `b := alpha * b * a`
+ * on the `Right`, BLAS's `trmm`, packing into the caller's `work` (`trmm_work_len` says how much).
+ *
+ * `a` is square, of b's rows on the left and b's columns on the right. Only its `uplo` triangle is
+ * read, and with `Diag.Unit` not its diagonal either, which is taken to be ones. `uplo` names the
+ * triangle of the view as passed, so multiplying by the transpose of an upper-triangular matrix is
+ * `trmm(side, Uplo.Lower, diag, alpha, a.t(), b, work)`. An `alpha` of zero sets b to zero without
+ * reading it or `a`, as the reference does. Shapes that disagree trap, and so do buffers shorter than
+ * `trmm_work_len` says and a view built by hand that reaches past its data.
+ */
+trmm[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: MatrixMut[T], work: GemmWork[T])
+    val k = side match
+        Left -> b.rows
+        Right -> b.cols
+    assert(a.rows == k && a.cols == k, "trmm's matrices do not agree in shape")
+    assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
+    val need = trmm_work_len[T](side, b.rows, b.cols)
+    assert(work.a.len >= need.a && work.b.len >= need.b, "trmm's packing buffers are shorter than trmm_work_len says")
+    if b.rows == 0 || b.cols == 0 then return
+    if alpha == T.zero()
+        scale_c(b, alpha)
+        return
+    assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
+    val lower = uplo == Uplo.Lower
+    val unit = diag == Diag.Unit
+    side match
+        Left -> trmm_left(lower, unit, alpha, a, b, work)
+        Right -> trmm_left(!lower, unit, alpha, a.t(), b.t(), work)

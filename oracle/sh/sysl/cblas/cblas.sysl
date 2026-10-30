@@ -64,6 +64,14 @@ private diag_code(unit: bool) -> i32 = if unit then 132 else 131
 
 extern "cblas_dtrsm" c_dtrsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
 extern "cblas_strsm" c_strsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+extern "cblas_dtrmm" c_dtrmm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
+extern "cblas_strmm" c_strmm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+extern "cblas_dsyrk" c_dsyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, beta: f64, c: *f64, ldc: i32)
+extern "cblas_ssyrk" c_ssyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, beta: f32, c: *f32, ldc: i32)
+extern "cblas_dsymv" c_dsymv(order: i32, uplo: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+extern "cblas_ssymv" c_ssymv(order: i32, uplo: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+extern "cblas_dsyr2" c_dsyr2(order: i32, uplo: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32)
+extern "cblas_ssyr2" c_ssyr2(order: i32, uplo: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32)
 
 /** 1 when OpenBLAS's `cblas_ddot` is a different function from the one the link bound. */
 @needs(os)
@@ -129,6 +137,22 @@ extern "sysl_ob_sgemm" ob_sgemm(order: i32, transa: i32, transb: i32, m: i32, n:
 extern "sysl_ob_dtrsm" ob_dtrsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
 @needs(os)
 extern "sysl_ob_strsm" ob_strsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+@needs(os)
+extern "sysl_ob_dtrmm" ob_dtrmm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
+@needs(os)
+extern "sysl_ob_strmm" ob_strmm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+@needs(os)
+extern "sysl_ob_dsyrk" ob_dsyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, beta: f64, c: *f64, ldc: i32)
+@needs(os)
+extern "sysl_ob_ssyrk" ob_ssyrk(order: i32, uplo: i32, trans: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, beta: f32, c: *f32, ldc: i32)
+@needs(os)
+extern "sysl_ob_dsymv" ob_dsymv(order: i32, uplo: i32, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32)
+@needs(os)
+extern "sysl_ob_ssymv" ob_ssymv(order: i32, uplo: i32, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32)
+@needs(os)
+extern "sysl_ob_dsyr2" ob_dsyr2(order: i32, uplo: i32, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32)
+@needs(os)
+extern "sysl_ob_ssyr2" ob_ssyr2(order: i32, uplo: i32, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32)
 
 /** One width's CBLAS entry points in both libraries, so a check or a benchmark is written once for
  * both widths and both libraries.
@@ -157,6 +181,14 @@ trait Oracle: Real
      * `upper` names the triangle of the STORED A, as CBLAS has it, and `trans` solves with its transpose.
      */
     o_trsm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: Self, a: *Self, lda: i32, b: *Self, ldb: i32)
+    /** Column-major `trmm` on the `m` x `n` B, its arguments as `o_trsm`'s. */
+    o_trmm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: Self, a: *Self, lda: i32, b: *Self, ldb: i32)
+    /** Column-major `syrk` on the `n` x `n` C: the stored `a` is `n` x `k`, or `k` x `n` with `trans`. */
+    o_syrk(lib: Lib, upper: bool, trans: bool, n: i32, k: i32, alpha: Self, a: *Self, lda: i32, beta: Self, c: *Self, ldc: i32)
+    /** Column-major `symv` reading the `upper` (or lower) triangle of the stored `a`. */
+    o_symv(lib: Lib, upper: bool, n: i32, alpha: Self, a: *Self, lda: i32, x: *Self, incx: i32, beta: Self, y: *Self, incy: i32)
+    /** Column-major `syr2` on the `upper` (or lower) triangle of the stored `a`. */
+    o_syr2(lib: Lib, upper: bool, n: i32, alpha: Self, x: *Self, incx: i32, y: *Self, incy: i32, a: *Self, lda: i32)
 
 impl Oracle for f64
     from_unit(u: f64) -> f64 = u
@@ -202,6 +234,18 @@ impl Oracle for f64
     o_trsm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32) = lib match
         Accelerate -> c_dtrsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
         OpenBLAS -> ob_dtrsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+    o_trmm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32) = lib match
+        Accelerate -> c_dtrmm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+        OpenBLAS -> ob_dtrmm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+    o_syrk(lib: Lib, upper: bool, trans: bool, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, beta: f64, c: *f64, ldc: i32) = lib match
+        Accelerate -> c_dsyrk(col_major, uplo_code(upper), trans_code(trans), n, k, alpha, a, lda, beta, c, ldc)
+        OpenBLAS -> ob_dsyrk(col_major, uplo_code(upper), trans_code(trans), n, k, alpha, a, lda, beta, c, ldc)
+    o_symv(lib: Lib, upper: bool, n: i32, alpha: f64, a: *f64, lda: i32, x: *f64, incx: i32, beta: f64, y: *f64, incy: i32) = lib match
+        Accelerate -> c_dsymv(col_major, uplo_code(upper), n, alpha, a, lda, x, incx, beta, y, incy)
+        OpenBLAS -> ob_dsymv(col_major, uplo_code(upper), n, alpha, a, lda, x, incx, beta, y, incy)
+    o_syr2(lib: Lib, upper: bool, n: i32, alpha: f64, x: *f64, incx: i32, y: *f64, incy: i32, a: *f64, lda: i32) = lib match
+        Accelerate -> c_dsyr2(col_major, uplo_code(upper), n, alpha, x, incx, y, incy, a, lda)
+        OpenBLAS -> ob_dsyr2(col_major, uplo_code(upper), n, alpha, x, incx, y, incy, a, lda)
 
 impl Oracle for f32
     from_unit(u: f64) -> f32 = f32(u)
@@ -247,3 +291,15 @@ impl Oracle for f32
     o_trsm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32) = lib match
         Accelerate -> c_strsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
         OpenBLAS -> ob_strsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+    o_trmm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32) = lib match
+        Accelerate -> c_strmm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+        OpenBLAS -> ob_strmm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+    o_syrk(lib: Lib, upper: bool, trans: bool, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, beta: f32, c: *f32, ldc: i32) = lib match
+        Accelerate -> c_ssyrk(col_major, uplo_code(upper), trans_code(trans), n, k, alpha, a, lda, beta, c, ldc)
+        OpenBLAS -> ob_ssyrk(col_major, uplo_code(upper), trans_code(trans), n, k, alpha, a, lda, beta, c, ldc)
+    o_symv(lib: Lib, upper: bool, n: i32, alpha: f32, a: *f32, lda: i32, x: *f32, incx: i32, beta: f32, y: *f32, incy: i32) = lib match
+        Accelerate -> c_ssymv(col_major, uplo_code(upper), n, alpha, a, lda, x, incx, beta, y, incy)
+        OpenBLAS -> ob_ssymv(col_major, uplo_code(upper), n, alpha, a, lda, x, incx, beta, y, incy)
+    o_syr2(lib: Lib, upper: bool, n: i32, alpha: f32, x: *f32, incx: i32, y: *f32, incy: i32, a: *f32, lda: i32) = lib match
+        Accelerate -> c_ssyr2(col_major, uplo_code(upper), n, alpha, x, incx, y, incy, a, lda)
+        OpenBLAS -> ob_ssyr2(col_major, uplo_code(upper), n, alpha, x, incx, y, incy, a, lda)

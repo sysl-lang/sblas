@@ -1,0 +1,618 @@
+module sh.sysl.sblas
+@tests
+
+import sysl.buf.{Buf, buf_filled}
+
+// syrk, trmm, symv and syr2 against their definitions, computed here by the naive triple (or double)
+// loop. Every input is a small integer and alpha and beta are integers, so every sum is exact at both
+// widths and the routines must agree with the definition exactly, whatever order they add in. Each
+// matrix is laid out three ways — column-major, row-major, and with neither stride one — in storage
+// filled around it with a sentinel, so a write outside the view shows; the triangle a routine must not
+// read is NaN, or a sentinel to show it comes back bit for bit. Agreement with Accelerate and OpenBLAS
+// on random data is in the oracle's tests.
+
+/** A deterministic stream of integers in [-4, 3], from a 64-bit xorshift. */
+private struct Draw
+    state: u64
+
+impl Draw
+    next(*self) -> int
+        self.state ^= self.state << 13
+        self.state ^= self.state >> 7
+        self.state ^= self.state << 17
+        int(self.state >> 61) - 4
+
+/** The strides and storage length of a `rows` x `cols` matrix laid out as `layout`: 0 column-major with
+ * a row of padding, 1 row-major with a column of padding, 2 with rows two apart and columns further.
+ */
+private laid(layout: usize, rows: usize, cols: usize) -> (usize, usize, usize)
+    if layout == 0 then return (1, rows + 1, (rows + 1) * cols + 1)
+    if layout == 1 then return (cols + 1, 1, (cols + 1) * rows + 1)
+    (2, 2 * rows + 3, (2 * rows + 3) * cols + 1)
+
+private val layouts: [3]usize = [0, 1, 2]
+
+/** The sentinel storage holds around every matrix and vector. */
+private const pad: f64 = 7.25
+
+/** Equal, or both NaN. */
+private same[T: Real](a: T, b: T) -> bool = a == b || (a.is_nan() && b.is_nan())
+
+private inside(lower: bool, i: usize, j: usize) -> bool = if lower then i >= j else i <= j
+
+private copy_of[T: Real](xs: []T) -> Buf[T]
+    val b: Buf[T] = buf_filled(xs.len, T.zero())
+    for i in 0..<xs.len
+        b[i] = xs[i]
+    b
+
+/** Every element of `got` that `live` does not mark is as it was in `before`. */
+private untouched[T: Real](got: []T, before: []T, live: []bool, what: string)
+    for i in 0..<got.len
+        if !live[i]
+            assert(same(got[i], before[i]), what)
+
+// --- syrk ------------------------------------------------------------------------------------------
+
+/** `syrk` on an `n` x `k` A laid out as `la` and an `n` x `n` C laid out as `lc`. C's other triangle
+ * holds `outside`, and its own triangle is NaN where beta is zero, which must not survive.
+ */
+private check_syrk[T: Real](lower: bool, la: usize, lc: usize, n: usize, k: usize, alpha: T, beta: T, outside: T, seed: u64)
+    var g = Draw(seed)
+    val (ars, acs, alen) = laid(la, n, k)
+    val astore: Buf[T] = buf_filled(alen, T.nan())
+    val am = MatrixMut(astore.view(), n, k, ars, acs)
+    for j in 0..<k
+        for i in 0..<n
+            am.set(i, j, T(g.next()))
+    val a = am.as_view()
+    val (crs, ccs, clen) = laid(lc, n, n)
+    val cstore: Buf[T] = buf_filled(clen, T(pad))
+    val live: Buf[bool] = buf_filled(clen, false)
+    val c = MatrixMut(cstore.view(), n, n, crs, ccs)
+    for j in 0..<n
+        for i in 0..<n
+            if !inside(lower, i, j)
+                c.set(i, j, outside)
+            else
+                c.set(i, j, if beta == T.zero() then T.nan() else T(g.next()))
+                live[i * crs + j * ccs] = true
+    val want: Buf[T] = buf_filled(n * n, T.zero())
+    for j in 0..<n
+        for i in 0..<n
+            if inside(lower, i, j)
+                var s = T.zero()
+                for p in 0..<k
+                    s = s + a.at(i, p) * a.at(j, p)
+                want[i + j * n] = if beta == T.zero() then alpha * s else alpha * s + beta * c.at(i, j)
+    val before = copy_of(cstore.view())
+    val len = syrk_work_len[T](n, k)
+    val pa: Buf[T] = buf_filled(len.a, T.zero())
+    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    syrk(if lower then Uplo.Lower else Uplo.Upper, alpha, a, beta, c, GemmWork(pa.view(), pb.view()))
+    for j in 0..<n
+        for i in 0..<n
+            if inside(lower, i, j)
+                assert(c.at(i, j) == want[i + j * n], "syrk differs from its definition")
+    untouched(cstore.view(), before.view(), live.view(), "syrk wrote outside its triangle")
+
+private check_syrk_all[T: Real](n: usize, k: usize, seed: u64)
+    var s = seed
+    for lower in [true, false]
+        for la in layouts
+            for lc in layouts
+                check_syrk[T](lower, la, lc, n, k, T(2), T(-3), T.nan(), s)
+                s += 1
+
+private sweep_syrk[T: Real](seed: u64)
+    val (mr, nr, kc, mc, _) = gemm_blocking[T]()
+    for (n, k) in [(1, 1), (2, 3), (mr - 1, 1), (mr, nr), (mr + 1, nr + 1), (nr + 1, mr - 1), (2 * mr + 3, 5), (mc + mr + 1, 2), (mc - 1, 3), (3 * nr + 1, kc + 1), (2 * mr + 1, 2 * kc + 3)]
+        check_syrk_all[T](n, k, seed + u64(n * 1000 + k))
+
+@test("syrk is alpha A Aᵀ + beta C on its triangle across every blocking boundary, triangle and layout, f64")
+syrk_sizes_f64()
+    sweep_syrk[f64](101)
+
+@test("syrk is alpha A Aᵀ + beta C on its triangle across every blocking boundary, triangle and layout, f32")
+syrk_sizes_f32()
+    sweep_syrk[f32](102)
+
+/** The triangle of a C wider than one packed block of B. */
+private syrk_wide[T: Real](seed: u64)
+    val (_, _, _, _, ncols) = gemm_blocking[T]()
+    check_syrk[T](true, 0, 0, ncols + 1, 2, T(2), T(-3), T.nan(), seed)
+    check_syrk[T](false, 1, 0, ncols + 1, 2, T(-1), T(1), T.nan(), seed + 1)
+
+@test("syrk across gemm's NC block, both triangles, f64")
+syrk_wide_f64()
+    syrk_wide[f64](111)
+
+@test("syrk across gemm's NC block, both triangles, f32")
+syrk_wide_f32()
+    syrk_wide[f32](112)
+
+/** `alpha` and `beta` as (alpha, beta): general, beta zero over NaN, beta one, alpha zero, both zero,
+ * alpha zero with beta one (touches nothing).
+ */
+private val scalings: [6](f64, f64) = [(2, -3), (-1, 0), (1, 1), (0, 2), (0, 0), (0, 1)]
+
+private syrk_scalings[T: Real](seed: u64)
+    val (mr, _, _, _, _) = gemm_blocking[T]()
+    var s = seed
+    val shapes: [3](usize, usize) = [(2 * mr + 3, 7), (5, 0), (mr + 1, 1)]
+    for (al, be) in scalings
+        for lower in [true, false]
+            for lc in layouts
+                for (n, k) in shapes
+                    for outside in [T.nan(), T(pad)]
+                        check_syrk[T](lower, 0, lc, n, k, T(al), T(be), outside, s)
+                        s += 1
+
+@test("syrk at every alpha and beta, k zero, a NaN or a sentinel in the other triangle, f64")
+syrk_scalings_f64()
+    syrk_scalings[f64](121)
+
+@test("syrk at every alpha and beta, k zero, a NaN or a sentinel in the other triangle, f32")
+syrk_scalings_f32()
+    syrk_scalings[f32](122)
+
+@test("syrk with alpha zero reads nothing of A and only scales the triangle")
+syrk_alpha_zero_reads_nothing()
+    val a: Buf[f64] = buf_filled(40 * 3, f64.nan())
+    var c: [9]f64 = [1, 2, 3, f64.nan(), 5, 6, f64.nan(), f64.nan(), 9]
+    val len = syrk_work_len[f64](3, 40)
+    val pa: Buf[f64] = buf_filled(len.a, 0.0)
+    val pb: Buf[f64] = buf_filled(len.b, 0.0)
+    syrk(Uplo.Lower, 0.0, matrix(a.view(), 3, 40, 3), 2.0, matrix_mut(c[..], 3, 3, 3), GemmWork(pa.view(), pb.view()))
+    assert(c[0] == 2 && c[1] == 4 && c[2] == 6 && c[4] == 10 && c[5] == 12 && c[8] == 18)
+    assert(c[3].is_nan() && c[6].is_nan() && c[7].is_nan(), "syrk touched the upper triangle")
+
+@test("syrk on an empty C does nothing")
+syrk_empty()
+    var c: [2]f64 = [f64.nan(), 5]
+    val a: [2]f64 = [f64.nan(), f64.nan()]
+    var w: [1]f64
+    syrk(Uplo.Upper, 2.0, matrix(a[..], 0, 2, 1), 0.0, matrix_mut(c[..], 0, 0, 1), GemmWork(w[..], w[..]))
+    assert(c[0].is_nan() && c[1] == 5)
+
+@test("syrk_work_len is gemm's for C := A Aᵀ")
+syrk_work_lens()
+    val s = syrk_work_len[f64](70, 300)
+    val g = gemm_work_len[f64](70, 70, 300)
+    assert(s.a == g.a && s.b == g.b)
+    val none = syrk_work_len[f32](70, 0)
+    assert(none.a == 0 && none.b == 0)
+
+@test("syrk traps on a C that is not square", should_trap)
+syrk_not_square()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var c: [6]f64 = [1, 2, 3, 4, 5, 6]
+    syrk(Uplo.Lower, 1.0, matrix(a[..], 2, 2, 2), 0.0, matrix_mut(c[..], 2, 3, 2), GemmWork(w[..], w[..]))
+
+@test("syrk traps on an A with other than C's rows", should_trap)
+syrk_rows_mismatch()
+    var w: [1]f64
+    val a: [6]f64 = [1, 2, 3, 4, 5, 6]
+    var c: [4]f64 = [1, 2, 3, 4]
+    syrk(Uplo.Lower, 1.0, matrix(a[..], 3, 2, 3), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(w[..], w[..]))
+
+@test("syrk traps on packing buffers shorter than syrk_work_len says", should_trap)
+syrk_short_work()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var c: [4]f64 = [1, 2, 3, 4]
+    syrk(Uplo.Upper, 1.0, matrix(a[..], 2, 2, 2), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(w[..], w[..]))
+
+@test("a hand-built A past its data traps before syrk reads it", should_trap)
+syrk_a_past_end()
+    val a: [3]f64 = [1, 2, 3]
+    var c: [4]f64 = [1, 2, 3, 4]
+    val len = syrk_work_len[f64](2, 2)
+    val pa: Buf[f64] = buf_filled(len.a, 0.0)
+    val pb: Buf[f64] = buf_filled(len.b, 0.0)
+    syrk(Uplo.Lower, 1.0, Matrix(a[..], 2, 2, 1, 2), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa.view(), pb.view()))
+
+@test("a hand-built C past its data traps before syrk writes it, even with alpha zero", should_trap)
+syrk_c_past_end()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var c: [3]f64 = [1, 2, 3]
+    syrk(Uplo.Lower, 0.0, matrix(a[..], 2, 2, 2), 0.0, MatrixMut(c[..], 2, 2, 1, 2), GemmWork(w[..], w[..]))
+
+// --- trmm ------------------------------------------------------------------------------------------
+
+/** `trmm` with a triangle of order `k` laid out as `la`, NaN outside the view's `lower` triangle and on
+ * the diagonal when it is `unit`, and a B (`k` x `other` on the left, `other` x `k` on the right) laid
+ * out as `lb`; B must come back as `alpha op(A) X` exactly, and nothing around it may change.
+ */
+private check_trmm[T: Real](left: bool, lower: bool, unit: bool, la: usize, lb: usize, k: usize, other: usize, alpha: T, seed: u64)
+    var g = Draw(seed)
+    val (ars, acs, alen) = laid(la, k, k)
+    val astore: Buf[T] = buf_filled(alen, T.nan())
+    val am = MatrixMut(astore.view(), k, k, ars, acs)
+    for j in 0..<k
+        for i in 0..<k
+            if inside(lower, i, j) && (i != j || !unit)
+                am.set(i, j, T(g.next()))
+    val a = am.as_view()
+    val tri = (i: usize, j: usize) -> if i == j && unit then T.one() else if inside(lower, i, j) then a.at(i, j) else T.zero()
+    val (rows, cols) = if left then (k, other) else (other, k)
+    val (brs, bcs, blen) = laid(lb, rows, cols)
+    val bstore: Buf[T] = buf_filled(blen, T(pad))
+    val live: Buf[bool] = buf_filled(blen, false)
+    val b = MatrixMut(bstore.view(), rows, cols, brs, bcs)
+    for j in 0..<cols
+        for i in 0..<rows
+            b.set(i, j, T(g.next()))
+            live[i * brs + j * bcs] = true
+    val want: Buf[T] = buf_filled(rows * cols, T.zero())
+    for j in 0..<cols
+        for i in 0..<rows
+            var s = T.zero()
+            for p in 0..<k
+                s = s + (if left then tri(i, p) * b.at(p, j) else b.at(i, p) * tri(p, j))
+            want[i + j * rows] = alpha * s
+    val before = copy_of(bstore.view())
+    val side = if left then Side.Left else Side.Right
+    val len = trmm_work_len[T](side, rows, cols)
+    val pa: Buf[T] = buf_filled(len.a, T.zero())
+    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    trmm(side, if lower then Uplo.Lower else Uplo.Upper, if unit then Diag.Unit else Diag.NonUnit, alpha, a, b, GemmWork(pa.view(), pb.view()))
+    for j in 0..<cols
+        for i in 0..<rows
+            assert(b.at(i, j) == want[i + j * rows], "trmm differs from its definition")
+    untouched(bstore.view(), before.view(), live.view(), "trmm wrote outside B")
+
+private check_trmm_all[T: Real](k: usize, other: usize, seed: u64)
+    var s = seed
+    for left in [true, false]
+        for lower in [true, false]
+            for unit in [false, true]
+                for la in layouts
+                    for lb in layouts
+                        check_trmm[T](left, lower, unit, la, lb, k, other, if s % 2 == 0 then T(2) else T(-1), s)
+                        s += 1
+
+private sweep_trmm[T: Real](seed: u64)
+    val (mr, nr, kc, mc, _) = gemm_blocking[T]()
+    val leaf = trsm_leaf
+    for (k, other) in [(1, 1), (2, 3), (leaf - 1, nr + 1), (leaf, 1), (leaf + 1, nr - 1), (leaf + mr + 1, nr + 1), (2 * leaf + nr, 2 * nr + 1), (mc + leaf + 3, 2)]
+        check_trmm_all[T](k, other, seed + u64(k) * 64)
+    // KC: the top split's gemm runs deeper than one slice, and the lower half is taller than MC.
+    for left in [true, false]
+        for lower in [true, false]
+            check_trmm[T](left, lower, false, 0, 1, 2 * kc + 3 * leaf, 3, T(2), seed + 7)
+
+@test("trmm is alpha op(A) B across every blocking boundary, every side, triangle, diagonal and layout, f64")
+trmm_sizes_f64()
+    sweep_trmm[f64](131)
+
+@test("trmm is alpha op(A) B across every blocking boundary, every side, triangle, diagonal and layout, f32")
+trmm_sizes_f32()
+    sweep_trmm[f32](132)
+
+private trmm_leaf_orders[T: Real](seed: u64)
+    for k in 1..trsm_leaf
+        check_trmm_all[T](k, 11, seed + u64(k) * 64)
+
+@test("trmm's leaf is right at every order up to it, every side, triangle, diagonal and layout, f64")
+trmm_leaf_orders_f64()
+    trmm_leaf_orders[f64](141)
+
+@test("trmm's leaf is right at every order up to it, every side, triangle, diagonal and layout, f32")
+trmm_leaf_orders_f32()
+    trmm_leaf_orders[f32](142)
+
+/** An identity triangle of order `k` with ones below (above) the diagonal in column `z`, times a B of
+ * ones with an infinity at row `z`: the infinity reaches exactly the rows the product sends it to —
+ * row `z` and those below it (above it) — and every other row is exactly one.
+ */
+private check_infinity[T: Real](lower: bool, k: usize, z: usize, lb: usize)
+    val am: Buf[T] = buf_filled(k * k, T.nan())
+    for j in 0..<k
+        for i in 0..<k
+            if inside(lower, i, j)
+                am[i + j * k] = if i == j || j == z then T.one() else T.zero()
+    val (brs, bcs, blen) = laid(lb, k, 3)
+    val bstore: Buf[T] = buf_filled(blen, T(pad))
+    val b = MatrixMut(bstore.view(), k, 3, brs, bcs)
+    for j in 0..<3
+        for i in 0..<k
+            b.set(i, j, if i == z then T.infinity() else T.one())
+    var w: [1]T
+    trmm(Side.Left, if lower then Uplo.Lower else Uplo.Upper, Diag.NonUnit, T.one(), matrix(am.view(), k, k, k), b, GemmWork(w[..], w[..]))
+    for j in 0..<3
+        for i in 0..<k
+            val reached = if lower then i >= z else i <= z
+            if reached
+                assert(b.at(i, j) == T.infinity(), "trmm lost the infinity")
+            else
+                assert(b.at(i, j) == T.one(), "trmm sent an infinity to a row the product does not")
+
+private trmm_infinities[T: Real]()
+    for lower in [true, false]
+        for k in [trsm_leaf, 7]
+            for z in [0, k / 2, k - 1]
+                for lb in layouts
+                    check_infinity[T](lower, k, z, lb)
+
+@test("an infinity in B reaches exactly the rows trmm's product sends it to, f64")
+trmm_infinity_f64()
+    trmm_infinities[f64]()
+
+@test("an infinity in B reaches exactly the rows trmm's product sends it to, f32")
+trmm_infinity_f32()
+    trmm_infinities[f32]()
+
+@test("trmm with alpha zero sets B to zero without reading B or A, on either side and past the leaf")
+trmm_alpha_zero()
+    val ks: [2]usize = [3, 40]
+    for k in ks
+        val a: Buf[f64] = buf_filled(k * k, f64.nan())
+        for side in [Side.Left, Side.Right]
+            val b: Buf[f64] = buf_filled((k + 1) * k, f64.nan())
+            for j in 0..<k
+                b[k + j * (k + 1)] = 5
+            val len = trmm_work_len[f64](side, k, k)
+            val pa: Buf[f64] = buf_filled(len.a, 0.0)
+            val pb: Buf[f64] = buf_filled(len.b, 0.0)
+            trmm(side, Uplo.Upper, Diag.NonUnit, 0.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, k, k + 1), GemmWork(pa.view(), pb.view()))
+            for j in 0..<k
+                for i in 0..<k
+                    assert(b[i + j * (k + 1)] == 0, "alpha zero left something in B")
+                assert(b[k + j * (k + 1)] == 5, "alpha zero wrote B's padding")
+
+@test("trmm with an empty B does nothing and reads nothing, on either side")
+trmm_empty()
+    val a: Buf[f64] = buf_filled(25, f64.nan())
+    var b: [5]f64 = [f64.nan(), 1, 2, 3, 4]
+    var w: [1]f64
+    trmm(Side.Left, Uplo.Lower, Diag.NonUnit, 2.0, matrix(a.view(), 5, 5, 5), matrix_mut(b[..], 5, 0, 5), GemmWork(w[..], w[..]))
+    trmm(Side.Right, Uplo.Upper, Diag.NonUnit, 0.0, matrix(a.view(), 5, 5, 5), matrix_mut(b[..], 0, 5, 1), GemmWork(w[..], w[..]))
+    assert(b[0].is_nan() && b[1] == 1 && b[4] == 4, "an empty trmm touched B")
+
+@test("trmm_work_len is trsm's: nothing up to the leaf, gemm's buffers past it, by the triangle's side")
+trmm_work_lens()
+    for side in [Side.Left, Side.Right]
+        for (m, n) in [(trsm_leaf, 1000), (trsm_leaf + 1, 9), (9, trsm_leaf + 1), (1000, trsm_leaf)]
+            val t = trmm_work_len[f64](side, m, n)
+            val s = trsm_work_len[f64](side, m, n)
+            assert(t.a == s.a && t.b == s.b)
+
+@test("trmm traps on an A that is not square", should_trap)
+trmm_not_square()
+    var w: [1]f64
+    val a: [6]f64 = [1, 2, 3, 4, 5, 6]
+    var b: [2]f64 = [1, 2]
+    trmm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, matrix(a[..], 2, 3, 2), matrix_mut(b[..], 2, 1, 2), GemmWork(w[..], w[..]))
+
+@test("trmm traps on an A whose order is not B's rows on the left", should_trap)
+trmm_left_mismatch()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var b: [3]f64 = [1, 2, 3]
+    trmm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, matrix(a[..], 2, 2, 2), matrix_mut(b[..], 3, 1, 3), GemmWork(w[..], w[..]))
+
+@test("trmm traps on an A whose order is not B's columns on the right", should_trap)
+trmm_right_mismatch()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var b: [2]f64 = [1, 2]
+    trmm(Side.Right, Uplo.Lower, Diag.NonUnit, 1.0, matrix(a[..], 2, 2, 2), matrix_mut(b[..], 2, 1, 2), GemmWork(w[..], w[..]))
+
+@test("trmm traps on packing buffers shorter than trmm_work_len says", should_trap)
+trmm_short_work()
+    var w: [1]f64
+    val k: usize = 40
+    val a: Buf[f64] = buf_filled(k * k, 1.0)
+    val b: Buf[f64] = buf_filled(k, 1.0)
+    trmm(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, 1, k), GemmWork(w[..], w[..]))
+
+@test("a hand-built A past its data traps before trmm reads it", should_trap)
+trmm_a_past_end()
+    var w: [1]f64
+    val a: [3]f64 = [1, 2, 3]
+    var b: [2]f64 = [1, 2]
+    trmm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, Matrix(a[..], 2, 2, 1, 2), matrix_mut(b[..], 2, 1, 2), GemmWork(w[..], w[..]))
+
+@test("a hand-built B past its data traps before trmm writes it, even with alpha zero", should_trap)
+trmm_b_past_end()
+    var w: [1]f64
+    val a: [4]f64 = [1, 0, 0, 1]
+    var b: [3]f64 = [1, 2, 3]
+    trmm(Side.Left, Uplo.Lower, Diag.NonUnit, 0.0, matrix(a[..], 2, 2, 2), MatrixMut(b[..], 2, 2, 1, 2), GemmWork(w[..], w[..]))
+
+// --- symv and syr2 ---------------------------------------------------------------------------------
+
+private extent(n: usize, inc: int) -> usize = if n == 0 then 1 else 1 + (n - 1) * usize(inc.abs())
+
+/** Orders: empty, one, every remainder of the four-column pass, and enough for the kernel's whole
+ * vectors and their tails at both widths.
+ */
+private val orders: [13]usize = [0, 1, 2, 3, 4, 5, 7, 8, 9, 20, 37, 70, 133]
+
+/** Stride pairs for x and y: both contiguous (the column paths), each sign, and the walks. */
+private val incs: [5](int, int) = [(1, 1), (-1, -1), (2, -3), (1, 2), (-2, 1)]
+
+/** A symmetric `n` x `n` matrix laid out as `layout`, held in its `lower` triangle; the other triangle
+ * and the padding are NaN.
+ */
+private sym_store[T: Real](lower: bool, layout: usize, n: usize, g: *Draw) -> (Buf[T], usize, usize)
+    val (rs, cs, len) = laid(layout, n, n)
+    val store: Buf[T] = buf_filled(len, T.nan())
+    for j in 0..<n
+        for i in 0..<n
+            if inside(lower, i, j)
+                store[i * rs + j * cs] = T(g.next())
+    (store, rs, cs)
+
+private check_symv[T: Real](lower: bool, la: usize, n: usize, incx: int, incy: int, alpha: T, beta: T, seed: u64)
+    var g = Draw(seed)
+    val (astore, rs, cs) = sym_store[T](lower, la, n, &g)
+    val a = Matrix(astore.view(), n, n, rs, cs)
+    val sym = (i: usize, j: usize) -> if inside(lower, i, j) then a.at(i, j) else a.at(j, i)
+    val xs: Buf[T] = buf_filled(extent(n, incx), T.nan())
+    val x = strided(xs.view(), n, incx)
+    for i in 0..<xs.len()
+        if i % usize(incx.abs()) == 0
+            xs[i] = T(g.next())
+    val ys: Buf[T] = buf_filled(extent(n, incy), T(pad))
+    val live: Buf[bool] = buf_filled(ys.len(), false)
+    val y = strided_mut(ys.view(), n, incy)
+    for i in 0..<n
+        y.set(i, if beta == T.zero() then T.nan() else T(g.next()))
+    for i in 0..<ys.len()
+        live[i] = n > 0 && i % usize(incy.abs()) == 0
+    val want: Buf[T] = buf_filled(n, T.zero())
+    for i in 0..<n
+        var s = T.zero()
+        for j in 0..<n
+            s = s + sym(i, j) * x.at(j)
+        want[i] = if beta == T.zero() then alpha * s else alpha * s + beta * y.at(i)
+    val before = copy_of(ys.view())
+    symv(if lower then Uplo.Lower else Uplo.Upper, alpha, a, x, beta, y)
+    if n > 0 && !(alpha == T.zero() && beta == T.one())
+        for i in 0..<n
+            assert(y.at(i) == want[i], "symv differs from its definition")
+    else
+        for i in 0..<live.len()
+            live[i] = false
+    untouched(ys.view(), before.view(), live.view(), "symv wrote outside y")
+
+private sweep_symv[T: Real](seed: u64)
+    var s = seed
+    for n in orders
+        for lower in [true, false]
+            for la in layouts
+                for (incx, incy) in incs
+                    check_symv[T](lower, la, n, incx, incy, T(2), T(-3), s)
+                    s += 1
+    val few: [3]usize = [0, 5, 37]
+    for (al, be) in scalings
+        for lower in [true, false]
+            for n in few
+                check_symv[T](lower, 0, n, 1, 1, T(al), T(be), s)
+                check_symv[T](lower, 2, n, 2, -1, T(al), T(be), s + 1)
+                s += 2
+
+@test("symv is alpha A x + beta y for every order, triangle, layout, stride and scaling, f64")
+symv_def_f64()
+    sweep_symv[f64](151)
+
+@test("symv is alpha A x + beta y for every order, triangle, layout, stride and scaling, f32")
+symv_def_f32()
+    sweep_symv[f32](152)
+
+private check_syr2[T: Real](lower: bool, la: usize, n: usize, incx: int, incy: int, alpha: T, seed: u64)
+    var g = Draw(seed)
+    val (astore, rs, cs) = sym_store[T](lower, la, n, &g)
+    val a = MatrixMut(astore.view(), n, n, rs, cs)
+    val live: Buf[bool] = buf_filled(astore.len(), false)
+    if alpha != T.zero()
+        for j in 0..<n
+            for i in 0..<n
+                if inside(lower, i, j)
+                    live[i * rs + j * cs] = true
+    val xs: Buf[T] = buf_filled(extent(n, incx), T.nan())
+    val x = strided(xs.view(), n, incx)
+    val ys: Buf[T] = buf_filled(extent(n, incy), T.nan())
+    val y = strided(ys.view(), n, incy)
+    for i in 0..<n
+        xs[usize(x.first() + int(i) * incx)] = T(g.next())
+        ys[usize(y.first() + int(i) * incy)] = T(g.next())
+    val want: Buf[T] = buf_filled(n * n, T.zero())
+    for j in 0..<n
+        for i in 0..<n
+            if inside(lower, i, j)
+                want[i + j * n] = a.at(i, j) + alpha * (x.at(i) * y.at(j) + y.at(i) * x.at(j))
+    val before = copy_of(astore.view())
+    syr2(if lower then Uplo.Lower else Uplo.Upper, alpha, x, y, a)
+    for j in 0..<n
+        for i in 0..<n
+            if inside(lower, i, j) && alpha != T.zero()
+                assert(a.at(i, j) == want[i + j * n], "syr2 differs from its definition")
+    untouched(astore.view(), before.view(), live.view(), "syr2 wrote outside its triangle")
+
+private sweep_syr2[T: Real](seed: u64)
+    var s = seed
+    for n in orders
+        for lower in [true, false]
+            for la in layouts
+                for (incx, incy) in incs
+                    check_syr2[T](lower, la, n, incx, incy, if s % 2 == 0 then T(2) else T(-1), s)
+                    s += 1
+    for lower in [true, false]
+        check_syr2[T](lower, 0, 37, 1, 1, T.zero(), s)
+        s += 1
+
+@test("syr2 is alpha (x yᵀ + y xᵀ) + A on its triangle for every order, triangle, layout and stride, f64")
+syr2_def_f64()
+    sweep_syr2[f64](161)
+
+@test("syr2 is alpha (x yᵀ + y xᵀ) + A on its triangle for every order, triangle, layout and stride, f32")
+syr2_def_f32()
+    sweep_syr2[f32](162)
+
+@test("symv traps on a matrix that is not square", should_trap)
+symv_not_square()
+    val a: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [3]f64 = [1, 2, 3]
+    var y: [2]f64 = [1, 2]
+    symv(Uplo.Lower, 1.0, matrix(a[..], 2, 3, 2), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("symv traps on an x of other than the matrix's order", should_trap)
+symv_x_mismatch()
+    val a: [4]f64 = [1, 2, 3, 4]
+    val x: [3]f64 = [1, 2, 3]
+    var y: [2]f64 = [1, 2]
+    symv(Uplo.Lower, 1.0, matrix(a[..], 2, 2, 2), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("symv traps on a y of other than the matrix's order", should_trap)
+symv_y_mismatch()
+    val a: [4]f64 = [1, 2, 3, 4]
+    val x: [2]f64 = [1, 2]
+    var y: [3]f64 = [1, 2, 3]
+    symv(Uplo.Upper, 1.0, matrix(a[..], 2, 2, 2), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("a hand-built matrix past its data traps before symv reads it", should_trap)
+symv_a_past_end()
+    val a: [3]f64 = [1, 2, 3]
+    val x: [2]f64 = [1, 2]
+    var y: [2]f64 = [1, 2]
+    symv(Uplo.Lower, 1.0, Matrix(a[..], 2, 2, 1, 2), view(x[..]), 0.0, view_mut(y[..]))
+
+@test("a hand-built y past its data traps before symv writes it", should_trap)
+symv_y_past_end()
+    val a: [4]f64 = [1, 2, 3, 4]
+    val x: [2]f64 = [1, 2]
+    var y: [2]f64 = [1, 2]
+    symv(Uplo.Lower, 1.0, matrix(a[..], 2, 2, 2), view(x[..]), 0.0, StridedMut(y[..], 2, 2))
+
+@test("syr2 traps on a matrix that is not square", should_trap)
+syr2_not_square()
+    var a: [6]f64 = [1, 2, 3, 4, 5, 6]
+    val x: [2]f64 = [1, 2]
+    val y: [3]f64 = [1, 2, 3]
+    syr2(Uplo.Lower, 1.0, view(x[..]), view(y[..]), matrix_mut(a[..], 2, 3, 2))
+
+@test("syr2 traps on an x of other than the matrix's order", should_trap)
+syr2_x_mismatch()
+    var a: [4]f64 = [1, 2, 3, 4]
+    val x: [3]f64 = [1, 2, 3]
+    val y: [2]f64 = [1, 2]
+    syr2(Uplo.Lower, 1.0, view(x[..]), view(y[..]), matrix_mut(a[..], 2, 2, 2))
+
+@test("syr2 traps on a y of other than the matrix's order", should_trap)
+syr2_y_mismatch()
+    var a: [4]f64 = [1, 2, 3, 4]
+    val x: [2]f64 = [1, 2]
+    val y: [3]f64 = [1, 2, 3]
+    syr2(Uplo.Upper, 1.0, view(x[..]), view(y[..]), matrix_mut(a[..], 2, 2, 2))
+
+@test("a hand-built matrix past its data traps before syr2 writes it, even with alpha zero", should_trap)
+syr2_a_past_end()
+    var a: [3]f64 = [1, 2, 3]
+    val x: [2]f64 = [1, 2]
+    val y: [2]f64 = [1, 2]
+    syr2(Uplo.Lower, 0.0, view(x[..]), view(y[..]), MatrixMut(a[..], 2, 2, 1, 2))

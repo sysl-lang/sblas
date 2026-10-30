@@ -247,3 +247,59 @@ void sysl_ob_strsm(int order, int side, int uplo, int trans, int diag, int m, in
     RESOLVE(trsm_s, "cblas_strsm");
     fn(order, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb);
 }
+
+/* trmm has trsm's arguments. */
+void sysl_ob_dtrmm(int order, int side, int uplo, int trans, int diag, int m, int n, double alpha,
+                   const double *a, int lda, double *b, int ldb) {
+    RESOLVE(trsm_d, "cblas_dtrmm");
+    fn(order, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb);
+}
+
+void sysl_ob_strmm(int order, int side, int uplo, int trans, int diag, int m, int n, float alpha,
+                   const float *a, int lda, float *b, int ldb) {
+    RESOLVE(trsm_s, "cblas_strmm");
+    fn(order, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb);
+}
+
+typedef void (*syrk_d)(int, int, int, int, int, double, const double *, int, double, double *, int);
+typedef void (*syrk_s)(int, int, int, int, int, float, const float *, int, float, float *, int);
+typedef void (*symv_d)(int, int, int, double, const double *, int, const double *, int, double, double *, int);
+typedef void (*symv_s)(int, int, int, float, const float *, int, const float *, int, float, float *, int);
+typedef void (*syr2_d)(int, int, int, double, const double *, int, const double *, int, double *, int);
+typedef void (*syr2_s)(int, int, int, float, const float *, int, const float *, int, float *, int);
+
+void sysl_ob_dsyrk(int order, int uplo, int trans, int n, int k, double alpha, const double *a, int lda, double beta,
+                   double *c, int ldc) {
+    RESOLVE(syrk_d, "cblas_dsyrk");
+    fn(order, uplo, trans, n, k, alpha, a, lda, beta, c, ldc);
+}
+
+void sysl_ob_ssyrk(int order, int uplo, int trans, int n, int k, float alpha, const float *a, int lda, float beta,
+                   float *c, int ldc) {
+    RESOLVE(syrk_s, "cblas_ssyrk");
+    fn(order, uplo, trans, n, k, alpha, a, lda, beta, c, ldc);
+}
+
+void sysl_ob_dsymv(int order, int uplo, int n, double alpha, const double *a, int lda, const double *x, int incx,
+                   double beta, double *y, int incy) {
+    RESOLVE(symv_d, "cblas_dsymv");
+    fn(order, uplo, n, alpha, a, lda, x, incx, beta, y, incy);
+}
+
+void sysl_ob_ssymv(int order, int uplo, int n, float alpha, const float *a, int lda, const float *x, int incx,
+                   float beta, float *y, int incy) {
+    RESOLVE(symv_s, "cblas_ssymv");
+    fn(order, uplo, n, alpha, a, lda, x, incx, beta, y, incy);
+}
+
+void sysl_ob_dsyr2(int order, int uplo, int n, double alpha, const double *x, int incx, const double *y, int incy,
+                   double *a, int lda) {
+    RESOLVE(syr2_d, "cblas_dsyr2");
+    fn(order, uplo, n, alpha, x, incx, y, incy, a, lda);
+}
+
+void sysl_ob_ssyr2(int order, int uplo, int n, float alpha, const float *x, int incx, const float *y, int incy,
+                   float *a, int lda) {
+    RESOLVE(syr2_s, "cblas_ssyr2");
+    fn(order, uplo, n, alpha, x, incx, y, incy, a, lda);
+}
