@@ -22,85 +22,114 @@ OpenBLAS is loaded at run time from `$SYSL_OPENBLAS`, else Homebrew's
 `/opt/homebrew/opt/openblas/lib/libopenblas.dylib`, and pinned to one thread
 (`oracle/sh/sysl/cblas/openblas.c` says why it is not linked).
 
-## Apple M5 Pro, sysl 0.8.0, OpenBLAS 0.3.34, 2026-10-29
+## Apple M5 Pro, sysl 0.8.1, OpenBLAS 0.3.34, 2026-10-30
 
-Load average 6.0 (1 min) when it started, single-threaded throughout. GB/s; the last two columns are
-sysl as a percentage of each library.
+Load average 5.5 (1 min) when it started, 6.6 at the end of Level 1, 6.9 at the end; single-threaded
+throughout. GB/s; the last two columns are sysl as a percentage of each library.
 
 | type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |
 |---|---|---|---:|---:|---:|---:|---:|
-| f64 | dot | L1 1024 | 182.9 | 150.3 | 146.6 | 122 | 125 |
-| f64 | axpy | L1 1024 | 254.2 | 224.8 | 255.0 | 113 | 100 |
-| f64 | scal | L1 1024 | 223.5 | 158.7 | 210.1 | 141 | 106 |
-| f64 | asum | L1 1024 | 18.3 | 117.2 | 132.2 | 16 | 14 |
-| f64 | nrm2 | L1 1024 | 2.1 | 38.4 | 9.4 | 5 | 22 |
-| f64 | iamax | L1 1024 | 17.6 | 55.6 | 108.4 | 32 | 16 |
-| f64 | copy | L1 1024 | 216.7 | 146.3 | 119.7 | 148 | 181 |
-| f64 | swap | L1 1024 | 240.2 | 271.5 | 171.9 | 88 | 140 |
-| f64 | rot | L1 1024 | 223.0 | 243.6 | 203.0 | 92 | 110 |
-| f64 | dot | L2 262144 | 104.2 | 955.4 | 94.7 | 11 | 110 |
-| f64 | axpy | L2 262144 | 145.4 | 687.8 | 135.7 | 21 | 107 |
-| f64 | scal | L2 262144 | 149.1 | 532.3 | 151.3 | 28 | 99 |
-| f64 | asum | L2 262144 | 15.6 | 264.6 | 114.4 | 6 | 14 |
-| f64 | nrm2 | L2 262144 | 2.1 | 37.1 | 9.1 | 6 | 23 |
-| f64 | iamax | L2 262144 | 17.1 | 57.7 | 102.5 | 30 | 17 |
-| f64 | copy | L2 262144 | 108.5 | 533.0 | 124.2 | 20 | 87 |
-| f64 | swap | L2 262144 | 143.7 | 521.1 | 106.2 | 28 | 135 |
-| f64 | rot | L2 262144 | 144.2 | 530.4 | 140.4 | 27 | 103 |
-| f64 | dot | DRAM 4194304 | 109.8 | 169.0 | 114.4 | 65 | 96 |
-| f64 | axpy | DRAM 4194304 | 142.5 | 168.6 | 146.7 | 85 | 97 |
-| f64 | scal | DRAM 4194304 | 143.0 | 250.7 | 142.1 | 57 | 101 |
-| f64 | asum | DRAM 4194304 | 15.6 | 194.2 | 93.9 | 8 | 17 |
-| f64 | nrm2 | DRAM 4194304 | 2.1 | 36.9 | 9.1 | 6 | 23 |
-| f64 | iamax | DRAM 4194304 | 17.2 | 57.1 | 90.0 | 30 | 19 |
-| f64 | copy | DRAM 4194304 | 103.8 | 136.4 | 121.9 | 76 | 85 |
-| f64 | swap | DRAM 4194304 | 145.0 | 206.6 | 83.6 | 70 | 174 |
-| f64 | rot | DRAM 4194304 | 145.4 | 201.6 | 149.1 | 72 | 98 |
-| f32 | dot | L1 1024 | 173.3 | 160.5 | 137.4 | 108 | 126 |
-| f32 | axpy | L1 1024 | 231.1 | 113.5 | 173.9 | 204 | 133 |
-| f32 | scal | L1 1024 | 192.7 | 82.0 | 178.2 | 235 | 108 |
-| f32 | asum | L1 1024 | 9.5 | 115.7 | 125.4 | 8 | 8 |
-| f32 | nrm2 | L1 1024 | 2.2 | 41.5 | 4.7 | 5 | 46 |
-| f32 | iamax | L1 1024 | 8.5 | 52.4 | 71.8 | 16 | 12 |
-| f32 | copy | L1 1024 | 194.7 | 64.3 | 103.5 | 303 | 188 |
-| f32 | swap | L1 1024 | 220.3 | 148.8 | 162.3 | 148 | 136 |
-| f32 | rot | L1 1024 | 206.0 | 143.0 | 186.5 | 144 | 110 |
-| f32 | dot | L2 262144 | 111.0 | 985.4 | 111.7 | 11 | 99 |
-| f32 | axpy | L2 262144 | 149.5 | 682.0 | 134.6 | 22 | 111 |
-| f32 | scal | L2 262144 | 149.4 | 528.4 | 148.6 | 28 | 101 |
-| f32 | asum | L2 262144 | 8.0 | 260.6 | 130.3 | 3 | 6 |
-| f32 | nrm2 | L2 262144 | 2.1 | 36.5 | 4.5 | 6 | 47 |
-| f32 | iamax | L2 262144 | 8.6 | 57.4 | 123.1 | 15 | 7 |
-| f32 | copy | L2 262144 | 108.3 | 535.1 | 127.7 | 20 | 85 |
-| f32 | swap | L2 262144 | 145.8 | 534.6 | 89.3 | 27 | 163 |
-| f32 | rot | L2 262144 | 146.6 | 529.0 | 143.7 | 28 | 102 |
-| f32 | dot | DRAM 4194304 | 108.4 | 174.6 | 112.2 | 62 | 97 |
-| f32 | axpy | DRAM 4194304 | 148.1 | 236.9 | 137.3 | 63 | 108 |
-| f32 | scal | DRAM 4194304 | 148.0 | 309.5 | 147.5 | 48 | 100 |
-| f32 | asum | DRAM 4194304 | 8.0 | 213.4 | 102.8 | 4 | 8 |
-| f32 | nrm2 | DRAM 4194304 | 2.1 | 36.5 | 4.5 | 6 | 47 |
-| f32 | iamax | DRAM 4194304 | 8.6 | 57.2 | 89.8 | 15 | 10 |
-| f32 | copy | DRAM 4194304 | 98.7 | 262.3 | 122.0 | 38 | 81 |
-| f32 | swap | DRAM 4194304 | 139.7 | 236.3 | 83.1 | 59 | 168 |
-| f32 | rot | DRAM 4194304 | 140.3 | 236.3 | 138.0 | 59 | 102 |
+| f64 | dot | L1 1024 | 175.8 | 144.3 | 140.9 | 122 | 125 |
+| f64 | axpy | L1 1024 | 244.3 | 222.9 | 242.1 | 110 | 101 |
+| f64 | scal | L1 1024 | 203.5 | 155.1 | 205.2 | 131 | 99 |
+| f64 | asum | L1 1024 | 122.9 | 112.0 | 123.1 | 110 | 100 |
+| f64 | nrm2 | L1 1024 | 20.6 | 36.5 | 9.0 | 56 | 228 |
+| f64 | iamax | L1 1024 | 79.0 | 52.8 | 103.1 | 150 | 77 |
+| f64 | copy | L1 1024 | 197.8 | 119.0 | 111.8 | 166 | 177 |
+| f64 | swap | L1 1024 | 220.4 | 263.5 | 153.1 | 84 | 144 |
+| f64 | rot | L1 1024 | 207.3 | 233.2 | 183.3 | 89 | 113 |
+| f64 | dot | L2 262144 | 100.6 | 742.5 | 87.3 | 14 | 115 |
+| f64 | axpy | L2 262144 | 133.4 | 579.1 | 123.2 | 23 | 108 |
+| f64 | scal | L2 262144 | 135.8 | 486.4 | 134.8 | 28 | 101 |
+| f64 | asum | L2 262144 | 103.5 | 247.6 | 100.2 | 42 | 103 |
+| f64 | nrm2 | L2 262144 | 20.3 | 34.5 | 8.7 | 59 | 234 |
+| f64 | iamax | L2 262144 | 79.8 | 51.9 | 91.2 | 154 | 87 |
+| f64 | copy | L2 262144 | 98.5 | 476.1 | 115.9 | 21 | 85 |
+| f64 | swap | L2 262144 | 123.2 | 444.4 | 72.4 | 28 | 170 |
+| f64 | rot | L2 262144 | 119.8 | 386.1 | 111.5 | 31 | 107 |
+| f64 | dot | DRAM 4194304 | 90.5 | 106.5 | 92.6 | 85 | 98 |
+| f64 | axpy | DRAM 4194304 | 125.3 | 151.5 | 122.8 | 83 | 102 |
+| f64 | scal | DRAM 4194304 | 122.4 | 191.1 | 113.2 | 64 | 108 |
+| f64 | asum | DRAM 4194304 | 79.9 | 166.1 | 80.8 | 48 | 99 |
+| f64 | nrm2 | DRAM 4194304 | 19.8 | 33.9 | 8.6 | 58 | 231 |
+| f64 | iamax | DRAM 4194304 | 67.0 | 48.7 | 72.4 | 138 | 93 |
+| f64 | copy | DRAM 4194304 | 77.9 | 89.0 | 103.7 | 88 | 75 |
+| f64 | swap | DRAM 4194304 | 123.6 | 142.2 | 80.6 | 87 | 153 |
+| f64 | rot | DRAM 4194304 | 123.6 | 140.9 | 114.5 | 88 | 108 |
+| f32 | dot | L1 1024 | 166.8 | 152.1 | 128.1 | 110 | 130 |
+| f32 | axpy | L1 1024 | 218.8 | 113.6 | 170.6 | 193 | 128 |
+| f32 | scal | L1 1024 | 200.7 | 107.0 | 174.8 | 188 | 115 |
+| f32 | asum | L1 1024 | 103.7 | 92.7 | 100.6 | 112 | 103 |
+| f32 | nrm2 | L1 1024 | 19.1 | 38.8 | 4.5 | 49 | 427 |
+| f32 | iamax | L1 1024 | 64.7 | 47.4 | 61.1 | 136 | 106 |
+| f32 | copy | L1 1024 | 185.0 | 61.4 | 90.9 | 301 | 204 |
+| f32 | swap | L1 1024 | 207.6 | 107.2 | 154.4 | 194 | 134 |
+| f32 | rot | L1 1024 | 193.1 | 124.5 | 180.6 | 155 | 107 |
+| f32 | dot | L2 262144 | 114.0 | 882.3 | 103.5 | 13 | 110 |
+| f32 | axpy | L2 262144 | 143.8 | 658.1 | 127.7 | 22 | 113 |
+| f32 | scal | L2 262144 | 140.9 | 492.7 | 140.8 | 29 | 100 |
+| f32 | asum | L2 262144 | 93.7 | 251.0 | 105.3 | 37 | 89 |
+| f32 | nrm2 | L2 262144 | 20.2 | 34.8 | 4.3 | 58 | 467 |
+| f32 | iamax | L2 262144 | 71.2 | 53.8 | 93.1 | 132 | 76 |
+| f32 | copy | L2 262144 | 102.0 | 504.2 | 120.1 | 20 | 85 |
+| f32 | swap | L2 262144 | 142.3 | 508.5 | 90.8 | 28 | 157 |
+| f32 | rot | L2 262144 | 138.8 | 505.9 | 136.8 | 27 | 101 |
+| f32 | dot | DRAM 4194304 | 99.4 | 134.1 | 104.9 | 74 | 95 |
+| f32 | axpy | DRAM 4194304 | 136.3 | 181.9 | 128.0 | 75 | 106 |
+| f32 | scal | DRAM 4194304 | 138.9 | 265.2 | 140.5 | 52 | 99 |
+| f32 | asum | DRAM 4194304 | 75.6 | 134.3 | 78.0 | 56 | 97 |
+| f32 | nrm2 | DRAM 4194304 | 20.4 | 34.5 | 4.3 | 59 | 471 |
+| f32 | iamax | DRAM 4194304 | 73.8 | 50.6 | 77.9 | 146 | 95 |
+| f32 | copy | DRAM 4194304 | 92.6 | 204.3 | 115.0 | 45 | 81 |
+| f32 | swap | DRAM 4194304 | 138.8 | 191.9 | 80.3 | 72 | 173 |
+| f32 | rot | DRAM 4194304 | 133.9 | 178.7 | 125.8 | 75 | 106 |
+
+Level 2 on the same run, GFLOPS (2mn per call) on square column-major matrices; `gemv T` is `gemv`
+on `a.t()`, CBLAS's `trans = 'T'`.
+
+| type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |
+|---|---|---|---:|---:|---:|---:|---:|
+| f64 | gemv N | L1 48x48 | 26.7 | 30.1 | 12.4 | 89 | 216 |
+| f64 | gemv T | L1 48x48 | 26.5 | 19.5 | 17.3 | 136 | 153 |
+| f64 | ger | L1 48x48 | 16.3 | 17.5 | 13.3 | 93 | 123 |
+| f64 | gemv N | L2 256x256 | 26.1 | 175.3 | 15.9 | 15 | 164 |
+| f64 | gemv T | L2 256x256 | 26.6 | 68.5 | 17.9 | 39 | 148 |
+| f64 | ger | L2 256x256 | 15.3 | 29.0 | 16.2 | 53 | 94 |
+| f64 | gemv N | DRAM 2048x2048 | 17.1 | 34.9 | 16.0 | 49 | 107 |
+| f64 | gemv T | DRAM 2048x2048 | 17.7 | 41.0 | 16.7 | 43 | 106 |
+| f64 | ger | DRAM 2048x2048 | 14.2 | 15.7 | 15.6 | 90 | 91 |
+| f32 | gemv N | L1 48x48 | 39.7 | 52.0 | 47.9 | 76 | 83 |
+| f32 | gemv T | L1 48x48 | 51.0 | 46.5 | 30.3 | 110 | 168 |
+| f32 | ger | L1 48x48 | 29.2 | 32.4 | 26.2 | 90 | 112 |
+| f32 | gemv N | L2 256x256 | 55.7 | 246.0 | 55.4 | 23 | 101 |
+| f32 | gemv T | L2 256x256 | 49.7 | 176.2 | 31.2 | 28 | 159 |
+| f32 | ger | L2 256x256 | 29.7 | 94.5 | 24.4 | 31 | 122 |
+| f32 | gemv N | DRAM 2048x2048 | 36.7 | 116.5 | 38.8 | 31 | 95 |
+| f32 | gemv T | DRAM 2048x2048 | 40.4 | 98.8 | 35.2 | 41 | 115 |
+| f32 | ger | DRAM 2048x2048 | 30.3 | 44.2 | 24.8 | 69 | 122 |
 
 What the numbers say:
 
-- **The six kernel routines are at OpenBLAS parity or better**: 81–188% of it at every size and both
-  widths; `copy` in L2 and DRAM (81–87%) is the one place below. In L1 they also beat Accelerate in
-  most cells.
-- **Against Accelerate in L2 they reach 11–28%.** On M4 and later Accelerate runs these on the SME
-  matrix unit, which streams from L2 faster than one core's NEON pipes can issue (955 GB/s for f64
-  `dot`, about 240 GFLOPS); OpenBLAS is NEON and the like-for-like baseline.
-- **`asum`, `nrm2` and `iamax` are scalar walks** waiting for a lane-wise `abs` (DESIGN.md, F2), and
-  are 6–47% of OpenBLAS. Measured on the same run: a vector `asum` with `|v|` spelled as a `select`
-  runs 3.6–4.4x the scalar loop (68 GB/s against 16–19), and the `nrm2` kernel with its band test
-  spelled `(v > t) | (v < -t)` runs 8.7x (18.3 GB/s against 2.1, which is 2x OpenBLAS's and half
-  Accelerate's). Neither longhand is shipped; both are the gain sysl 0.8.1's `abs` unlocks.
-- **The vector loads' run checks cost nothing measurable here** (DESIGN.md, F1): a C replica of the
-  `dot` and `axpy` kernels with and without the two compare-and-branch pairs per step ran at
-  100–101% at 1024 and 262144 elements. The checks stay a finding for smaller cores and for the
-  micro-kernel, not a cost on this one.
+- **Every Level 1 routine but `iamax` is at OpenBLAS parity or better** at every size and both widths;
+  `copy` in L2 and DRAM (75–85%) and f32 `asum` in L2 (89%) are the places below. `nrm2` runs 2.3x
+  OpenBLAS's at f64 and 4.3–4.7x at f32, and 49–59% of Accelerate's, with Blue's scaling kept.
+- **`iamax` is 76–106% of OpenBLAS.** It reads each chunk of 16 KB once for the largest magnitude, lane
+  by lane, and a second time from L1 only when that beats every chunk before it.
+- **Level 2 is at OpenBLAS parity or better** except `ger` in f64 L2 and DRAM (91–94%) and f32 `gemv N`
+  at 48 (83%, where OpenBLAS's small-matrix path wins), and 15–136% of Accelerate.
+- **Against Accelerate in L2 the streaming routines reach 13–42%.** On M4 and later Accelerate runs
+  these on the SME matrix unit, which streams from L2 faster than one core's NEON pipes can issue (742
+  GB/s for f64 `dot`); OpenBLAS is NEON and the like-for-like baseline.
+- **No kernel loop carries a bounds check.** Each kernel checks its slices' lengths once and runs
+  `@unchecked`, so the only compare in a main loop is the loop's own: counted in the disassembly,
+  `dot` is 23 instructions per 16 f64, `axpy` 27, `gemv`'s four-column pass 67 and its four-row dot
+  pass 37. A run check per vector load would add a compare and a branch each — two pairs in `dot`
+  and `axpy`, five in each `gemv` pass — which on this core is within noise, since the loops are
+  memory-bound or close to it.
+- **`sysl.hint.prefetch` is not used.** Measured on this machine at load under 10: 1 KB ahead in `dot`
+  and `axpy` was 0–10% slower in L1 and L2 and level in DRAM; 512 bytes ahead on each of `gemv`'s four
+  matrix streams moved its DRAM figures up 5–12% of OpenBLAS's but its L2 ones down 3–10%. The
+  hardware prefetcher already follows these sequential streams.
 
 ## gemm: Apple M5 Pro, sysl 0.8.0, OpenBLAS 0.3.34, 2026-10-29
 

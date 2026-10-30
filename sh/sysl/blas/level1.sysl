@@ -1,8 +1,6 @@
 module sh.sysl.blas
 @no_alloc
 
-import sysl.hint.prefetch
-
 // Level 1: vector-vector routines, O(n) work on O(n) data.
 //
 // A routine has up to two paths. When the views it reads are contiguous and pair their elements the
@@ -47,8 +45,6 @@ private[blas] dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) ->
     var i: usize = 0
     @unchecked
         while i + W <= x.len
-            prefetch(&x[i + 1024 / sizeof(T)])
-            prefetch(&y[i + 1024 / sizeof(T)])
             val a: <W>T = x.load(i)
             val b: <W>T = y.load(i)
             acc = a.mul_add(b, acc)
@@ -64,8 +60,6 @@ private[blas] axpy_kernel[T: Real, const W: usize](alpha: T, x: []const T, y: []
     var i: usize = 0
     @unchecked
         while i + W <= x.len
-            prefetch(&x[i + 1024 / sizeof(T)])
-            prefetch(&y[i + 1024 / sizeof(T)])
             val a: <W>T = x.load(i)
             val b: <W>T = y.load(i)
             y.store(i, a.mul_add(alpha, b))
@@ -304,7 +298,7 @@ dot[T: Real](x: Strided[T], y: Strided[T]) -> T
  * element. A NaN anywhere gives NaN; an infinity, infinity.
  */
 nrm2[T: Real](x: Strided[T]) -> T
-    if x.inc == 1 || x.inc == -1 || x.len <= 1 then return nrm2_kernel[T, block_bytes / sizeof(T)](span(x.data, x.len)).norm()
+    if x.inc == 1 || x.inc == -1 || x.len <= 1 then return nrm2_kernel[T, block_bytes / 2 / sizeof(T)](span(x.data, x.len)).norm()
     walkable(x.data.len, x.len, x.inc)
     var sums = Blue(T.zero(), T.zero(), T.zero())
     var ix = x.first()
