@@ -1,9 +1,9 @@
 module sh.sysl.blas
 @no_alloc
 
-import sysl.math.min
+import sysl.math.{min, max}
 
-// Level 3: gemm, laid out as BLIS lays it out.
+// Level 3: gemm, laid out as BLIS lays it out, and trsm on top of it (at the end of the file).
 //
 // Five loops partition the work. The outermost walks C in column blocks NC wide; inside it the shared
 // dimension is cut into slices KC deep, and each KC x NC block of op(B) is packed into panels NR
@@ -259,3 +259,124 @@ gemm[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], wo
     assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
     assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
     gemm_blocked[T, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](alpha, a, b, beta, c, work)
+
+// --- trsm ------------------------------------------------------------------------------------------
+//
+// `A X = B` is solved recursively. A is split into two diagonal blocks and the block beside them; the
+// rows of B that the first diagonal block owns are solved, the other rows are updated by gemm with
+// that solution, and the second diagonal block is solved — top first for a lower triangle, bottom
+// first for an upper. Halving keeps gemm's shared dimension as deep as the problem allows, so for a
+// large A nearly every flop is gemm's, in gemm's own packing buffers; only the diagonal blocks of at
+// most `trsm_leaf` rows are solved by substitution. A right-hand solve is the left-hand one on the
+// transposes: `X A = B` is `Aᵀ Xᵀ = Bᵀ`, and the transpose of one triangle is the other.
+
+/** The order of the diagonal blocks solved by substitution, a multiple of MR at both widths, so that
+ * the gemm updates between them start on whole tiles.
+ */
+private[blas] const trsm_leaf: usize = 16
+
+/** The block of `a` with `rows` x `cols` elements whose first is (`i0`, `j0`); it must not be empty. */
+private block[T](a: Matrix[T], i0: usize, j0: usize, rows: usize, cols: usize) -> Matrix[T] = Matrix(a.data[i0 * a.row_stride + j0 * a.col_stride..], rows, cols, a.row_stride, a.col_stride)
+
+/** The writable form of `block`. */
+private block_mut[T](b: MatrixMut[T], i0: usize, j0: usize, rows: usize, cols: usize) -> MatrixMut[T] = MatrixMut(b.data[i0 * b.row_stride + j0 * b.col_stride..], rows, cols, b.row_stride, b.col_stride)
+
+/** Solves `a x = b` in place by substitution, `a` being a triangle of at most `trsm_leaf` rows. Each
+ * solved row is subtracted from the rows that still depend on it; the inner loop runs down b's
+ * columns when its rows are adjacent and along its rows when its columns are.
+ */
+private solve_leaf[T: Real](lower: bool, unit: bool, a: Matrix[T], b: MatrixMut[T])
+    val m = b.rows
+    val n = b.cols
+    var inv: [trsm_leaf]T
+    for i in 0..<m
+        inv[i] = if unit then T.one() else T.one() / a.at(i, i)
+    val rs = b.row_stride
+    val cs = b.col_stride
+    val ars = a.row_stride
+    val acs = a.col_stride
+    @unchecked
+        if rs <= cs
+            for j in 0..<n
+                val col = j * cs
+                for s in 0..<m
+                    val i = if lower then s else m - 1 - s
+                    val x = b.data[col + i * rs] * inv[i]
+                    b.data[col + i * rs] = x
+                    val (lo, hi) = if lower then (i + 1, m) else (0, i)
+                    for p in lo..<hi
+                        val at = col + p * rs
+                        b.data[at] = b.data[at] - a.data[p * ars + i * acs] * x
+        else
+            for s in 0..<m
+                val i = if lower then s else m - 1 - s
+                val row = i * rs
+                if !unit
+                    for j in 0..<n
+                        b.data[row + j * cs] = b.data[row + j * cs] * inv[i]
+                val (lo, hi) = if lower then (i + 1, m) else (0, i)
+                for p in lo..<hi
+                    val f = a.data[p * ars + i * acs]
+                    val dst = p * rs
+                    for j in 0..<n
+                        b.data[dst + j * cs] = b.data[dst + j * cs] - f * b.data[row + j * cs]
+
+/** `b := a⁻¹ b` for a triangular `a` of b's rows, recursively as the section's comment describes. */
+private trsm_left[T: Real](lower: bool, unit: bool, a: Matrix[T], b: MatrixMut[T], work: GemmWork[T])
+    val m = b.rows
+    if m <= trsm_leaf
+        solve_leaf(lower, unit, a, b)
+        return
+    val n = b.cols
+    val m1 = max(trsm_leaf, m / 2 / trsm_leaf * trsm_leaf)
+    val m2 = m - m1
+    val b1 = block_mut(b, 0, 0, m1, n)
+    val b2 = block_mut(b, m1, 0, m2, n)
+    if lower
+        trsm_left(lower, unit, block(a, 0, 0, m1, m1), b1, work)
+        gemm(-T.one(), block(a, m1, 0, m2, m1), b1.as_view(), T.one(), b2, work)
+        trsm_left(lower, unit, block(a, m1, m1, m2, m2), b2, work)
+    else
+        trsm_left(lower, unit, block(a, m1, m1, m2, m2), b2, work)
+        gemm(-T.one(), block(a, 0, m1, m1, m2), b2.as_view(), T.one(), b1, work)
+        trsm_left(lower, unit, block(a, 0, 0, m1, m1), b1, work)
+
+/** How many elements each of `GemmWork`'s two buffers needs for `trsm` on an `m` x `n` B: the triangle
+ * is of order `m` on the `Left` and `n` on the `Right`. A triangle small enough to be solved without
+ * gemm needs none.
+ */
+trsm_work_len[T: Real](side: Side, m: usize, n: usize) -> GemmWorkLen
+    val (k, other) = side match
+        Left -> (m, n)
+        Right -> (n, m)
+    if k <= trsm_leaf then GemmWorkLen(0, 0) else gemm_work_len[T](k, other, k)
+
+/** Solves a triangular system for every column of `b` at once, in place: `b := alpha * a⁻¹ * b` on the
+ * `Left`, `b := alpha * b * a⁻¹` on the `Right`, packing into the caller's `work` (`trsm_work_len` says
+ * how much).
+ *
+ * `a` is square, of b's rows on the left and b's columns on the right. Only its `uplo` triangle is
+ * read, and with `Diag.Unit` not its diagonal either, which is taken to be ones. `uplo` names the
+ * triangle of the view as passed, so solving with the transpose of an upper-triangular matrix is
+ * `trsm(side, Uplo.Lower, diag, alpha, a.t(), b, work)`. An `alpha` of zero sets b to zero without
+ * reading it or `a`. As in the reference BLAS, a singular `a` is not detected: a zero on its diagonal
+ * yields infinities and NaNs. Shapes that disagree trap, and so do buffers shorter than
+ * `trsm_work_len` says and a view built by hand that reaches past its data.
+ */
+trsm[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: MatrixMut[T], work: GemmWork[T])
+    val k = side match
+        Left -> b.rows
+        Right -> b.cols
+    assert(a.rows == k && a.cols == k, "trsm's matrices do not agree in shape")
+    assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
+    val need = trsm_work_len[T](side, b.rows, b.cols)
+    assert(work.a.len >= need.a && work.b.len >= need.b, "trsm's packing buffers are shorter than trsm_work_len says")
+    if b.rows == 0 || b.cols == 0 then return
+    scale_c(b, alpha)
+    if alpha == T.zero() then return
+    assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
+    val lower = uplo == Uplo.Lower
+    val unit = diag == Diag.Unit
+    side match
+        Left -> trsm_left(lower, unit, a, b, work)
+        Right -> trsm_left(!lower, unit, a.t(), b.t(), work)

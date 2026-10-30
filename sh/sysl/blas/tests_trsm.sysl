@@ -1,0 +1,258 @@
+module sh.sysl.blas
+@tests
+
+import sysl.buf.{Buf, buf_filled}
+
+// trsm against its definition: small systems solved by hand, and generated ones multiplied back — B is
+// built as op(A) X from a known X, and the solve must return alpha X — at sizes that cross the
+// substitution leaf, gemm's tile, its KC slice, its MC block and its NC block. Agreement with
+// Accelerate and OpenBLAS on random data is in the oracle's tests.
+
+/** A deterministic stream of integers in [-4, 3], from a 64-bit xorshift. */
+private struct Ints
+    state: u64
+
+impl Ints
+    next(*self) -> int
+        self.state ^= self.state << 13
+        self.state ^= self.state >> 7
+        self.state ^= self.state << 17
+        int(self.state >> 61) - 4
+
+/** `k` at width T, built from ones, since `Real` has no conversion from an integer. */
+private whole[T: Real](k: int) -> T
+    var x = T.zero()
+    for _ in 0..<k.abs()
+        x = x + T.one()
+    if k < 0 then -x else x
+
+private w(left: bool, lower: bool, unit: bool) -> (Side, Uplo, Diag) = (if left then Side.Left else Side.Right, if lower then Uplo.Lower else Uplo.Upper, if unit then Diag.Unit else Diag.NonUnit)
+
+/** Builds a triangle of order `k` and a known X, forms B = op(A) X (or X op(A)), solves with alpha 2,
+ * and checks that 2 X comes back. The triangle is the view's `lower` one; the storage is column-major
+ * with `lda = k + 1`, holding that view directly or its transpose (`a_t`). Everything outside the
+ * triangle is NaN, and so is the diagonal when it is `unit`, so a read of either shows. B is `k` x
+ * `other` on the left and `other` x `k` on the right, stored column-major with two rows of padding, or
+ * as the transpose of that (`b_t`); the padding must come back as it went in.
+ *
+ * Off the diagonal the values are multiples of 2⁻¹³ no larger than 2⁻¹¹, so each row and column sums to
+ * under ½ in magnitude up to order 2048, and the diagonal is 1 to 4 in magnitude: op(A) is diagonally
+ * dominant both ways, its inverse is bounded by 2, and the solve's error is within `(k + 4) · 64` units
+ * of epsilon of |2 X| ≤ 8.
+ */
+private check_solve[T: Real](left: bool, lower: bool, unit: bool, a_t: bool, b_t: bool, k: usize, other: usize, seed: u64)
+    var g = Ints(seed)
+    var tiny = T.one()
+    for _ in 0..<13
+        tiny = tiny / whole[T](2)
+    val lda = k + 1
+    val store: Buf[T] = buf_filled(lda * k, T.nan())
+    for j in 0..<k
+        for i in 0..<k
+            val inside = if lower then i >= j else i <= j
+            if inside && (i != j || !unit)
+                val v = if i == j then whole[T](if g.next() < 0 then -1 - (g.next() + 4) / 2 else 1 + (g.next() + 4) / 2) else whole[T](g.next()) * tiny
+                store[if a_t then j + i * lda else i + j * lda] = v
+    val a = if a_t then matrix(store.view(), k, k, lda).t() else matrix(store.view(), k, k, lda)
+    val (rows, cols) = if left then (k, other) else (other, k)
+    val x: Buf[T] = buf_filled(rows * cols, T.zero())
+    for i in 0..<x.len()
+        x[i] = whole[T](g.next())
+    // The triangle's element (i, j) of the view, with the unit diagonal made explicit.
+    val tri = (i: usize, j: usize) -> if i == j && unit then T.one() else if (if lower then i >= j else i <= j) then a.at(i, j) else T.zero()
+    val (sr, sc) = if b_t then (cols, rows) else (rows, cols)
+    val ldb = sr + 2
+    val bs: Buf[T] = buf_filled(ldb * sc, whole[T](7))
+    val bm = if b_t then matrix_mut(bs.view(), sr, sc, ldb).t() else matrix_mut(bs.view(), sr, sc, ldb)
+    for j in 0..<cols
+        for i in 0..<rows
+            var s = T.zero()
+            for p in 0..<k
+                s = s + (if left then tri(i, p) * x[p + j * rows] else x[i + p * rows] * tri(p, j))
+            bm.set(i, j, s)
+    val (side, uplo, diag) = w(left, lower, unit)
+    val len = trsm_work_len[T](side, rows, cols)
+    val pa: Buf[T] = buf_filled(len.a, T.zero())
+    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    trsm(side, uplo, diag, whole[T](2), a, bm, GemmWork(pa.view(), pb.view()))
+    val tol = whole[T](64 * (int(k) + 4)) * T.epsilon() * whole[T](8)
+    for j in 0..<cols
+        for i in 0..<rows
+            val want = whole[T](2) * x[i + j * rows]
+            val got = bm.at(i, j)
+            assert((got - want).abs() <= tol, "trsm differs from its definition")
+    for j in 0..<sc
+        for i in sr..<ldb
+            assert(bs[i + j * ldb] == whole[T](7), "trsm wrote B's padding")
+
+/** Every side, triangle, transpose of A, diagonal and layout of B at one size. */
+private check_all[T: Real](k: usize, other: usize, seed: u64)
+    var s = seed
+    for left in [true, false]
+        for lower in [true, false]
+            for unit in [false, true]
+                for a_t in [false, true]
+                    for b_t in [false, true]
+                        check_solve[T](left, lower, unit, a_t, b_t, k, other, s)
+                        s += 1
+
+private sweep_trsm[T: Real](seed: u64)
+    val (mr, nr, kc, mc, ncols) = gemm_blocking[T]()
+    val leaf = trsm_leaf
+    for (k, other) in [(1, 1), (2, 3), (leaf - 1, nr + 1), (leaf, 1), (leaf + 1, nr - 1), (leaf + mr + 1, nr + 1), (2 * leaf + nr, 2 * nr + 1), (mc + leaf + 3, 2)]
+        check_all[T](k, other, seed + u64(k) * 64)
+    // KC: the top split's gemm runs deeper than one slice, and the lower half is taller than MC.
+    check_all[T](2 * kc + 3 * leaf, 3, seed + 7)
+    // NC: B is wider than one packed block of op(B).
+    check_solve[T](true, true, false, false, false, leaf + 1, ncols + 1, seed + 8)
+    check_solve[T](false, false, true, true, false, leaf + 1, ncols + 1, seed + 9)
+
+@test("trsm returns alpha X from op(A) X across every blocking boundary, every side, triangle, transpose and diagonal, f64")
+trsm_sizes_f64()
+    sweep_trsm[f64](31)
+
+@test("trsm returns alpha X from op(A) X across every blocking boundary, every side, triangle, transpose and diagonal, f32")
+trsm_sizes_f32()
+    sweep_trsm[f32](32)
+
+@test("the substitution leaf is a whole number of tiles at both widths, and the split stays on it")
+trsm_leaf_tiles()
+    for (mr, _, _, _, _) in [gemm_blocking[f64](), gemm_blocking[f32]()]
+        assert(trsm_leaf % mr == 0)
+
+// --- Hand-solved systems ---------------------------------------------------------------------------
+
+private val nan = f64.nan()
+
+/** Solves with a column-major B and no packing buffer, which a triangle within the leaf does not use. */
+private solve2(side: Side, uplo: Uplo, diag: Diag, alpha: f64, a: Matrix[f64], b: []f64, rows: usize, cols: usize)
+    var w: [1]f64
+    trsm(side, uplo, diag, alpha, a, matrix_mut(b, rows, cols, rows), GemmWork(w[..], w[..]))
+
+@test("trsm solves 2 x 2 systems by hand: each triangle, each side, a transposed A, a unit diagonal")
+trsm_by_hand()
+    // [2 0; 1 4] x = [2; 9]  ->  x = [1; 2]. The upper element is NaN, so reading it shows.
+    val lo: [4]f64 = [2, 1, nan, 4]
+    var b1: [2]f64 = [2, 9]
+    solve2(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, matrix(lo[..], 2, 2, 2), b1[..], 2, 1)
+    assert(b1[0] == 1 && b1[1] == 2)
+    // [2 1; 0 4] x = [4; 8]  ->  x = [1; 2].
+    val up: [4]f64 = [2, nan, 1, 4]
+    var b2: [2]f64 = [4, 8]
+    solve2(Side.Left, Uplo.Upper, Diag.NonUnit, 1.0, matrix(up[..], 2, 2, 2), b2[..], 2, 1)
+    assert(b2[0] == 1 && b2[1] == 2)
+    // The transpose of the upper matrix is the lower one: the same system, alpha 2.
+    var b3: [2]f64 = [2, 9]
+    solve2(Side.Left, Uplo.Lower, Diag.NonUnit, 2.0, matrix(up[..], 2, 2, 2).t(), b3[..], 2, 1)
+    assert(b3[0] == 2 && b3[1] == 4)
+    // x [2 0; 1 4] = [4 8]  ->  x = [1 2].
+    var b4: [2]f64 = [4, 8]
+    solve2(Side.Right, Uplo.Lower, Diag.NonUnit, 1.0, matrix(lo[..], 2, 2, 2), b4[..], 1, 2)
+    assert(b4[0] == 1 && b4[1] == 2)
+    // x [2 1; 0 4] = [2 9]  ->  x = [1 2].
+    var b5: [2]f64 = [2, 9]
+    solve2(Side.Right, Uplo.Upper, Diag.NonUnit, 1.0, matrix(up[..], 2, 2, 2), b5[..], 1, 2)
+    assert(b5[0] == 1 && b5[1] == 2)
+    // [1 0; 3 1] x = [1; 5]  ->  x = [1; 2], with the diagonal NaN and unread.
+    val unit_lo: [4]f64 = [nan, 3, nan, nan]
+    var b6: [2]f64 = [1, 5]
+    solve2(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(unit_lo[..], 2, 2, 2), b6[..], 2, 1)
+    assert(b6[0] == 1 && b6[1] == 2)
+    // x [1 0; 3 1] = [7 2]  ->  x = [1 2].
+    var b7: [2]f64 = [7, 2]
+    solve2(Side.Right, Uplo.Lower, Diag.Unit, 1.0, matrix(unit_lo[..], 2, 2, 2), b7[..], 1, 2)
+    assert(b7[0] == 1 && b7[1] == 2)
+
+@test("trsm with alpha zero sets B to zero without reading B or A")
+trsm_alpha_zero()
+    val a: Buf[f64] = buf_filled(9, nan)
+    var w: [1]f64
+    for side in [Side.Left, Side.Right]
+        for uplo in [Uplo.Lower, Uplo.Upper]
+            var b: [12]f64 = [nan, nan, nan, 5, nan, nan, nan, 5, nan, nan, nan, 5]
+            // B is 3 x 3 with a padding row on the left; on the right too, since A is 3 x 3 either way.
+            trsm(side, uplo, Diag.NonUnit, 0.0, matrix(a.view(), 3, 3, 3), matrix_mut(b[..], 3, 3, 4), GemmWork(w[..], w[..]))
+            for j in 0..<3
+                for i in 0..<3
+                    assert(b[i + 4 * j] == 0, "alpha zero left something in B")
+                assert(b[3 + 4 * j] == 5, "alpha zero wrote B's padding")
+
+@test("trsm with alpha zero on a triangle past the leaf zeroes B without reading it or A")
+trsm_alpha_zero_large()
+    val k: usize = 40
+    val a: Buf[f64] = buf_filled(k * k, nan)
+    val b: Buf[f64] = buf_filled(k * 2, nan)
+    val len = trsm_work_len[f64](Side.Left, k, 2)
+    val pa: Buf[f64] = buf_filled(len.a, 0.0)
+    val pb: Buf[f64] = buf_filled(len.b, 0.0)
+    trsm(Side.Left, Uplo.Upper, Diag.Unit, 0.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, 2, k), GemmWork(pa.view(), pb.view()))
+    for i in 0..<b.len()
+        assert(b[i] == 0)
+
+@test("trsm with an empty B does nothing and reads nothing, on either side")
+trsm_empty()
+    val a: Buf[f64] = buf_filled(25, nan)
+    var b: [5]f64 = [nan, 1, 2, 3, 4]
+    var w: [1]f64
+    // 5 x 0 on the left, 0 x 5 on the right: A is 5 x 5, B has no elements.
+    trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 2.0, matrix(a.view(), 5, 5, 5), matrix_mut(b[..], 5, 0, 5), GemmWork(w[..], w[..]))
+    trsm(Side.Right, Uplo.Upper, Diag.NonUnit, 2.0, matrix(a.view(), 5, 5, 5), matrix_mut(b[..], 0, 5, 1), GemmWork(w[..], w[..]))
+    // 0 x 0 A with a 0 x 3 B on the left and a 3 x 0 B on the right.
+    trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 2.0, matrix(a.view(), 0, 0, 1), matrix_mut(b[..], 0, 3, 1), GemmWork(w[..], w[..]))
+    trsm(Side.Right, Uplo.Lower, Diag.Unit, 2.0, matrix(a.view(), 0, 0, 1), matrix_mut(b[..], 3, 0, 3), GemmWork(w[..], w[..]))
+    assert(b[0].is_nan() && b[1] == 1 && b[4] == 4, "an empty trsm touched B")
+
+@test("trsm_work_len needs nothing up to the leaf and gemm's buffers past it, by the triangle's side")
+trsm_work_lens()
+    val small = trsm_work_len[f64](Side.Left, trsm_leaf, 1000)
+    assert(small.a == 0 && small.b == 0)
+    val left = trsm_work_len[f64](Side.Left, trsm_leaf + 1, 9)
+    val g = gemm_work_len[f64](trsm_leaf + 1, 9, trsm_leaf + 1)
+    assert(left.a == g.a && left.b == g.b)
+    val right = trsm_work_len[f64](Side.Right, 9, trsm_leaf + 1)
+    assert(right.a == g.a && right.b == g.b)
+    val none = trsm_work_len[f64](Side.Right, 1000, trsm_leaf)
+    assert(none.a == 0 && none.b == 0)
+
+@test("trsm traps on an A that is not square", should_trap)
+trsm_not_square()
+    var w: [1]f64
+    val a: [6]f64 = [1, 2, 3, 4, 5, 6]
+    var b: [2]f64 = [1, 2]
+    trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, matrix(a[..], 2, 3, 2), matrix_mut(b[..], 2, 1, 2), GemmWork(w[..], w[..]))
+
+@test("trsm traps on an A whose order is not B's rows on the left", should_trap)
+trsm_left_mismatch()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var b: [3]f64 = [1, 2, 3]
+    trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, matrix(a[..], 2, 2, 2), matrix_mut(b[..], 3, 1, 3), GemmWork(w[..], w[..]))
+
+@test("trsm traps on an A whose order is not B's columns on the right", should_trap)
+trsm_right_mismatch()
+    var w: [1]f64
+    val a: [4]f64 = [1, 2, 3, 4]
+    var b: [2]f64 = [1, 2]
+    trsm(Side.Right, Uplo.Lower, Diag.NonUnit, 1.0, matrix(a[..], 2, 2, 2), matrix_mut(b[..], 2, 1, 2), GemmWork(w[..], w[..]))
+
+@test("trsm traps on packing buffers shorter than trsm_work_len says", should_trap)
+trsm_short_work()
+    var w: [1]f64
+    val k: usize = 40
+    val a: Buf[f64] = buf_filled(k * k, 1.0)
+    val b: Buf[f64] = buf_filled(k, 1.0)
+    trsm(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, 1, k), GemmWork(w[..], w[..]))
+
+@test("a hand-built A past its data traps before trsm reads it", should_trap)
+trsm_hand_built_past_end()
+    var w: [1]f64
+    val a: [3]f64 = [1, 2, 3]
+    var b: [2]f64 = [1, 2]
+    trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, Matrix(a[..], 2, 2, 1, 2), matrix_mut(b[..], 2, 1, 2), GemmWork(w[..], w[..]))
+
+@test("a hand-built B past its data traps before trsm writes it, even with alpha zero", should_trap)
+trsm_hand_built_b_past_end()
+    var w: [1]f64
+    val a: [4]f64 = [1, 0, 0, 1]
+    var b: [3]f64 = [1, 2, 3]
+    trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 0.0, matrix(a[..], 2, 2, 2), MatrixMut(b[..], 2, 2, 1, 2), GemmWork(w[..], w[..]))

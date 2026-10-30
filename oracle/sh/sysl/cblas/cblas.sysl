@@ -58,6 +58,13 @@ extern "cblas_sger" c_sger(order: i32, m: i32, n: i32, alpha: f32, x: *f32, incx
 extern "cblas_dgemm" c_dgemm(order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32, beta: f64, c: *f64, ldc: i32)
 extern "cblas_sgemm" c_sgemm(order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, c: *f32, ldc: i32)
 
+private side_code(right: bool) -> i32 = if right then 142 else 141
+private uplo_code(upper: bool) -> i32 = if upper then 121 else 122
+private diag_code(unit: bool) -> i32 = if unit then 132 else 131
+
+extern "cblas_dtrsm" c_dtrsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
+extern "cblas_strsm" c_strsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
+
 /** 1 when OpenBLAS's `cblas_ddot` is a different function from the one the link bound. */
 @needs(os)
 extern "sysl_ob_distinct" ob_distinct() -> int
@@ -114,6 +121,10 @@ extern "sysl_ob_sger" ob_sger(order: i32, m: i32, n: i32, alpha: f32, x: *f32, i
 extern "sysl_ob_dgemm" ob_dgemm(order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32, beta: f64, c: *f64, ldc: i32)
 @needs(os)
 extern "sysl_ob_sgemm" ob_sgemm(order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, c: *f32, ldc: i32)
+@needs(os)
+extern "sysl_ob_dtrsm" ob_dtrsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32)
+@needs(os)
+extern "sysl_ob_strsm" ob_strsm(order: i32, side: i32, uplo: i32, trans: i32, diag: i32, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32)
 
 /** One width's CBLAS entry points in both libraries, so a check or a benchmark is written once for
  * both widths and both libraries.
@@ -138,6 +149,10 @@ trait Oracle: Real
      * the stored matrices.
      */
     o_gemm(lib: Lib, transa: bool, transb: bool, m: i32, n: i32, k: i32, alpha: Self, a: *Self, lda: i32, b: *Self, ldb: i32, beta: Self, c: *Self, ldc: i32)
+    /** Column-major `trsm` on the `m` x `n` B: A is of order `m`, or `n` when it is on the `right`;
+     * `upper` names the triangle of the STORED A, as CBLAS has it, and `trans` solves with its transpose.
+     */
+    o_trsm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: Self, a: *Self, lda: i32, b: *Self, ldb: i32)
 
 impl Oracle for f64
     from_unit(u: f64) -> f64 = u
@@ -180,6 +195,9 @@ impl Oracle for f64
     o_gemm(lib: Lib, transa: bool, transb: bool, m: i32, n: i32, k: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32, beta: f64, c: *f64, ldc: i32) = lib match
         Accelerate -> c_dgemm(col_major, trans_code(transa), trans_code(transb), m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
         OpenBLAS -> ob_dgemm(col_major, trans_code(transa), trans_code(transb), m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    o_trsm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: f64, a: *f64, lda: i32, b: *f64, ldb: i32) = lib match
+        Accelerate -> c_dtrsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+        OpenBLAS -> ob_dtrsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
 
 impl Oracle for f32
     from_unit(u: f64) -> f32 = f32(u)
@@ -222,3 +240,6 @@ impl Oracle for f32
     o_gemm(lib: Lib, transa: bool, transb: bool, m: i32, n: i32, k: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32, beta: f32, c: *f32, ldc: i32) = lib match
         Accelerate -> c_sgemm(col_major, trans_code(transa), trans_code(transb), m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
         OpenBLAS -> ob_sgemm(col_major, trans_code(transa), trans_code(transb), m, n, k, alpha, a, lda, b, ldb, beta, c, ldc)
+    o_trsm(lib: Lib, right: bool, upper: bool, trans: bool, unit: bool, m: i32, n: i32, alpha: f32, a: *f32, lda: i32, b: *f32, ldb: i32) = lib match
+        Accelerate -> c_strsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)
+        OpenBLAS -> ob_strsm(col_major, side_code(right), uplo_code(upper), trans_code(trans), diag_code(unit), m, n, alpha, a, lda, b, ldb)

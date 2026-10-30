@@ -158,3 +158,21 @@ impl[T] MatrixMut[T]
 
     /** The same elements, read-only. */
     as_view(self) -> Matrix[T] = Matrix(self.data, self.rows, self.cols, self.row_stride, self.col_stride)
+
+/** Which triangle of a square matrix a routine reads: `Upper` is the elements with `i <= j`, `Lower`
+ * those with `i >= j`, and the other triangle is never touched. It describes the view as passed, so the
+ * transpose of an upper triangle, `a.t()`, is `Lower`.
+ */
+enum Uplo
+    Upper
+    Lower
+
+/** Whether a triangular matrix's diagonal is read (`NonUnit`) or taken to be all ones (`Unit`). */
+enum Diag
+    NonUnit
+    Unit
+
+/** Which side of B a triangular matrix stands on: `Left` solves `A X = B`, `Right` solves `X A = B`. */
+enum Side
+    Left
+    Right

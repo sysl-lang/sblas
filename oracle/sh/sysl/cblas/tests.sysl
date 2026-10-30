@@ -2,7 +2,7 @@ module sh.sysl.cblas
 @tests
 
 import sh.sysl.blas.*
-import sh.sysl.blas.heap.gemm_alloc
+import sh.sysl.blas.heap.{gemm_alloc, trsm_alloc}
 import sysl.slices.as_mut_ptr
 import sysl.buf.{Buf, buf, buf_filled}
 
@@ -215,6 +215,88 @@ oracle_gemm_f64()
 oracle_gemm_f32()
     for lib in libs
         check_gemm[f32](lib, 6)
+
+// --- trsm ------------------------------------------------------------------------------------------
+
+/** Shapes (m, n) of B: each dimension empty, one, inside the substitution leaf (16), either side of
+ * it, across gemm's tile, and a triangle of 1072 — on the left as B's rows, on the right as its
+ * columns — whose top split runs gemm deeper than one KC slice and taller than MC at both widths.
+ */
+private val trsm_shapes: [11](usize, usize) = [(0, 3), (3, 0), (1, 1), (5, 7), (16, 9), (17, 9), (33, 20), (70, 13), (9, 70), (1072, 4), (4, 1072)]
+
+/** trsm through both implementations on equal copies of B, for every side, stored triangle, transpose
+ * of A and diagonal, with leading dimensions two past the rows they hold and alpha at zero, one and
+ * elsewhere. A is generated diagonally dominant both ways — a diagonal of magnitude 1 to 2 and
+ * off-diagonal elements under 1 / 2k, so each row and column sums to under ½ off the diagonal — which
+ * bounds its inverse by 2 and so every solution element by `2 |alpha| max |B|`. Each element must agree
+ * to within `16 (k + 4)` units of epsilon of that bound plus its own magnitude, k being A's order.
+ * Everything outside the stored triangle is NaN, and so is the diagonal when it is unit, so a read of
+ * either shows; where alpha is zero B starts as NaN and must come back exactly zero.
+ */
+private check_trsm[T: Oracle](lib: Lib, seed: u64)
+    var s = Stream(seed)
+    val alphas: [3]f64 = [0, 1, -1.375]
+    for (m, n) in trsm_shapes
+        for right in [false, true]
+            val k = if right then n else m
+            for upper in [false, true]
+                for ta in [false, true]
+                    for unit in [false, true]
+                        val lda = k + 2
+                        val av: Buf[T] = buf_filled(lda * k + 1, T.nan())
+                        for j in 0..<k
+                            for i in 0..<k
+                                if i == j
+                                    if !unit
+                                        val d = s.next()
+                                        av[i + j * lda] = T.from_unit(if d < 0 then d - 1 else d + 1)
+                                else if (if upper then i < j else i > j)
+                                    av[i + j * lda] = T.from_unit(s.next() / f64(2 * k))
+                        val stored = matrix(av.view(), k, k, lda)
+                        // The view's triangle: the transpose of the stored upper one is lower.
+                        val uplo = if upper != ta then Uplo.Upper else Uplo.Lower
+                        val side = if right then Side.Right else Side.Left
+                        val diag = if unit then Diag.Unit else Diag.NonUnit
+                        val ldb = m + 2
+                        for alpha_u in alphas
+                            val alpha = T.from_unit(alpha_u)
+                            val ours: Buf[T] = buf_filled(ldb * n + 1, T.zero())
+                            fill(ours.view(), &s, 1)
+                            var bmax = T.zero()
+                            for j in 0..<n
+                                for i in 0..<m
+                                    if alpha == T.zero()
+                                        ours[i + j * ldb] = T.nan()
+                                    else if ours[i + j * ldb].abs() > bmax
+                                        bmax = ours[i + j * ldb].abs()
+                            val theirs: Buf[T] = buf_filled(ours.len(), T.zero())
+                            val before: Buf[T] = buf_filled(ours.len(), T.zero())
+                            for i in 0..<ours.len()
+                                theirs[i] = ours[i]
+                                before[i] = ours[i]
+                            T.o_trsm(lib, right, upper, ta, unit, i32(m), i32(n), alpha, as_mut_ptr(av.view()), i32(lda), as_mut_ptr(theirs.view()), i32(ldb))
+                            trsm_alloc(side, uplo, diag, alpha, if ta then stored.t() else stored, matrix_mut(ours.view(), m, n, ldb))
+                            val bound = T.from_unit(2) * alpha.abs() * bmax
+                            for j in 0..<n
+                                for i in 0..<m
+                                    val got = ours[i + j * ldb]
+                                    if alpha == T.zero()
+                                        assert(got == T.zero(), "trsm with alpha zero left something in B")
+                                    else
+                                        assert(!got.is_nan(), "trsm left a NaN")
+                                        assert(near(got, theirs[i + j * ldb], bound, T.from_unit(f64(16 * (k + 4)))), "trsm")
+                                for i in m..<ldb
+                                    assert(ours[i + j * ldb] == before[i + j * ldb], "trsm wrote B's padding")
+
+@test("trsm agrees with Accelerate and OpenBLAS, every side, triangle, transpose, diagonal and alpha, f64")
+oracle_trsm_f64()
+    for lib in libs
+        check_trsm[f64](lib, 7)
+
+@test("trsm agrees with Accelerate and OpenBLAS, every side, triangle, transpose, diagonal and alpha, f32")
+oracle_trsm_f32()
+    for lib in libs
+        check_trsm[f32](lib, 8)
 
 // --- Level 2 ---------------------------------------------------------------------------------------
 

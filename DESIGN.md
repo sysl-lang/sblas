@@ -15,7 +15,7 @@ faer (Rust) and Octavian.jl.
 |---|---|---|
 | 1 | axpy, dot, nrm2, asum, scal, copy, swap, iamax, rot, rotg | done, f32 and f64 |
 | 2 | gemv, ger | done, f32 and f64 |
-| 3 | gemm (packing, cache blocking, threads), then trsm | gemm: the blocked structure, f32 and f64, single-threaded, not yet tuned |
+| 3 | gemm (packing, cache blocking, threads), trsm | gemm: the blocked structure, f32 and f64, single-threaded; trsm: recursive on gemm, f32 and f64, every side, triangle and diagonal |
 
 Complex element types, `rotm`/`rotmg`, and the banded and packed Level 2 forms are not scheduled.
 
@@ -147,6 +147,29 @@ there does not survive), `alpha = 0` or `k = 0` reads neither A nor B and only s
 `beta = 1` with `alpha = 0` touches nothing. Shapes that disagree, and buffers shorter than
 `gemm_work_len` says, trap. The allocating form lives in its own module because `@no_alloc` in a
 file's header binds the whole module.
+
+**`trsm` names its triangle with three enums**, since a view says where the elements are but not
+which of them to read:
+
+```sysl
+trsm(Side.Left, Uplo.Lower, Diag.NonUnit, alpha, a, b, work)      // b := alpha a⁻¹ b
+trsm(Side.Right, Uplo.Lower, Diag.Unit, alpha, u.t(), b, work)    // b := alpha b (uᵀ)⁻¹, u upper
+```
+
+`Uplo` describes the view as passed, not the storage: `a.t()` of an upper-triangular matrix is a
+lower-triangular view, so CBLAS's `(uplo = U, trans = T)` is `Uplo.Lower, a.t()` here. Only the
+named triangle is read, and with `Diag.Unit` not the diagonal either. `trsm_work_len(side, m, n)` sizes
+the same `GemmWork` buffers; a triangle within the substitution leaf needs none. `alpha = 0` sets B to
+zero reading neither B nor A, as the reference does; a singular A is not detected (a zero on the
+diagonal gives infinities), also as the reference does.
+
+The solve is recursive: A is halved (on a multiple of the 16-row leaf), the first diagonal block's rows
+of B are solved, the rest are updated by `gemm` (`B₂ -= A₂₁ X₁`, in the caller's packing buffers), and
+the second block is solved — top first for a lower triangle, bottom first for an upper. Halving keeps
+gemm's shared dimension as deep as the problem allows (an n = 2048 solve's first update is a k = 1024
+gemm), so nearly all of a large solve's flops are gemm's; only the 16-row diagonal blocks are done by
+substitution, with the inner loop along whichever of B's dimensions is contiguous. `Right` is `Left`
+on the transposes (`X A = B` is `Aᵀ Xᵀ = Bᵀ`, the triangle flipped), which the views make free.
 
 **A C-ABI export layer is possible and not decided** (see the questions). It would be `@export`
 definitions named `cblas_dgemm` and so on, converting CBLAS's `(order, trans, n, ptr, inc)` arguments
@@ -288,8 +311,8 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 3. **Mismatched lengths**: trap (now), use the shorter, or return a `Result`?
 4. **`iamax`'s result**: `Option[usize]`, 0-based (now), or CBLAS's plain index with 0 for empty?
 5. **Level 3 workspace** — *decided*: caller-supplied packing buffers in the core (`GemmWork`, sized
-   by `gemm_work_len`; it stays `@no_alloc` and usable on a board), plus
-   `sh.sysl.blas.heap.gemm_alloc`.
+   by `gemm_work_len` and `trsm_work_len`; it stays `@no_alloc` and usable on a board), plus
+   `sh.sysl.blas.heap.gemm_alloc` and `trsm_alloc`.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads**: whose pool — `sysl.threads`, a package, or the caller's?
 8. **Vector `mul_add` and `abs`**: add them to `<N>T` before the micro-kernels are written?
@@ -298,3 +321,8 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 11. **The speed target on Apple silicon** — *decided*: OpenBLAS's NEON path. Accelerate's SME is out
     of scope (it would need streaming-mode support in sysl) and is reported alongside, not chased.
 12. **The oracle on Linux**: `libcblas` is not a standard name there; link OpenBLAS directly?
+13. **How a triangle is named** — *decided, may be overruled*: enum parameters `Side`, `Uplo`, `Diag`,
+    with `Uplo` describing the view as passed (so `a.t()` of an upper triangle is `Lower`), rather than
+    CBLAS's triangle-of-the-storage or a triangular view type. A view type (`Lower(a)`) would carry the
+    triangle through `t()` itself; it waits for the routines that would share it (`trmm`, `symm`,
+    `syrk`, `trsv`) to show whether that is worth a type per triangle.

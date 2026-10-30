@@ -6,7 +6,7 @@ allocation, and it builds for bare-metal targets.
 
 Level 1 is here, generic over `f32` and `f64`: `axpy`, `dot`, `nrm2` (Blue's overflow- and
 underflow-safe algorithm), `asum`, `scal`, `copy`, `swap`, `iamax`, `rot`, `rotg`. Level 2 has begun: `gemv` (and, through `a.t()`, its transpose) and `ger`.
-Level 3 has `gemm`. The rest of Level 2 and Level 3 are designed in [DESIGN.md](DESIGN.md).
+Level 3 has `gemm` and `trsm`. The rest of Level 2 and Level 3 are designed in [DESIGN.md](DESIGN.md).
 
 ```sysl
 import sh.sysl.blas.*
@@ -47,6 +47,17 @@ var pb: [64]f64
 gemm(1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa[..], pb[..]))  // c = a aᵀ = [14, 32, 32, 77]
 ```
 
+`trsm` solves a triangular system in place for every column of B at once — `b := alpha a⁻¹ b` on the
+`Left`, `b := alpha b a⁻¹` on the `Right` — with the same packing buffers (`trsm_work_len`). `Uplo`
+names the triangle of the view as passed, so the transpose of an upper triangle is `Lower`:
+
+```sysl
+val l: [4]f64 = [2, 1, 0, 4]                                // [[2, 0], [1, 4]]
+var rhs: [2]f64 = [2, 9]
+trsm(Side.Left, Uplo.Lower, Diag.NonUnit, 1.0, matrix(l[..], 2, 2, 2), matrix_mut(rhs[..], 2, 1, 2), GemmWork(pa[..], pb[..]))  // rhs = [1, 2]
+trsm(Side.Left, Uplo.Upper, Diag.NonUnit, 1.0, matrix(l[..], 2, 2, 2).t(), matrix_mut(rhs[..], 2, 1, 2), GemmWork(pa[..], pb[..]))  // lᵀ x = rhs
+```
+
 ```
 dependencies {
   blas { git = "github.com/sysl-lang/blas", version = "0.1.0" }
@@ -59,11 +70,11 @@ Needs sysl 0.8.0.
 
 | directory | what |
 |---|---|
-| `sh/sysl/blas/` | the package — `blas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range, `rotg`'s signs, `iamax`'s ties, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary) |
-| `sh/sysl/blas/heap/` | `gemm_alloc`: gemm with its packing buffers allocated per call (the main module is `@no_alloc`) |
+| `sh/sysl/blas/` | the package — `blas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range, `rotg`'s signs, `iamax`'s ties, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary, `trsm` solved by hand and multiplied back across them) |
+| `sh/sysl/blas/heap/` | `gemm_alloc`, `trsm_alloc`: gemm and trsm with their packing buffers allocated per call (the main module is `@no_alloc`) |
 | `sh/sysl/blas/netlib_tests.sysl` | netlib's own Level 1 test tables (`dblat1.f`, `sblat1.f`) ported: the fixed vectors and expected results at every stride in them, with netlib's `SFAC`-scaled comparison |
 | `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign, transpose and shape |
-| `bench/` | GB/s of every contiguous Level 1 routine, GFLOPS of `gemv` and `ger`, and with `gemm` as its argument gemm's GFLOPS, against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
+| `bench/` | GB/s of every contiguous Level 1 routine, GFLOPS of `gemv` and `ger`, and with `gemm` or `trsm` as its argument that routine's GFLOPS, against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
 
 ## Speed
 

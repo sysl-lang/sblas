@@ -223,3 +223,19 @@ void sysl_ob_sgemm(int order, int transa, int transb, int m, int n, int k, float
     RESOLVE(gemm_s, "cblas_sgemm");
     fn(order, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
 }
+
+/* Side, uplo and diag are CBLAS enums too: 141/142, 121/122, 131/132. */
+typedef void (*trsm_d)(int, int, int, int, int, int, int, double, const double *, int, double *, int);
+typedef void (*trsm_s)(int, int, int, int, int, int, int, float, const float *, int, float *, int);
+
+void sysl_ob_dtrsm(int order, int side, int uplo, int trans, int diag, int m, int n, double alpha,
+                   const double *a, int lda, double *b, int ldb) {
+    RESOLVE(trsm_d, "cblas_dtrsm");
+    fn(order, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb);
+}
+
+void sysl_ob_strsm(int order, int side, int uplo, int trans, int diag, int m, int n, float alpha,
+                   const float *a, int lda, float *b, int ldb) {
+    RESOLVE(trsm_s, "cblas_strsm");
+    fn(order, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb);
+}
