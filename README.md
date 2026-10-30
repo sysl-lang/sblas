@@ -116,7 +116,9 @@ OpenBLAS at f64 and 4.3–4.7x at f32. Figures in [bench/README.md](bench/README
 `gemm` is BLIS's five loops around an 8x6 (f64) or 16x6 (f32) micro-kernel of `fmla` by element,
 with both panels packed by vectors; single-threaded on an M5 Pro it runs at 103–124% of OpenBLAS's
 NEON gemm from n = 128 at f64 and 96–108% at f32. `trsm` recurses onto gemm and solves its 16-row
-leaves in registers: 103–246% of OpenBLAS at every size.
+leaves in registers: 103–246% of OpenBLAS at every size. `gemm_par` on `Spawned` runs at 91–99%
+of OpenBLAS on the same thread count from n = 1024 (4 and 6 threads; 4.3–4.7x one thread at 6), and
+69–88% at n = 256, where starting threads per call is a large share of the time.
 
 `sysl test .` runs the package and the oracle; under ASan,
 `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`.

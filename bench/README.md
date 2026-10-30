@@ -12,11 +12,14 @@ sysl build . -o bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench gemm
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench trsm
+caffeinate -dimsu ./bench gemm_par
 ```
 
 With `gemm` it times gemm alone instead: square sizes 64 to 2048, GFLOPS. With `trsm` it times
 `B := A⁻¹ B` (left, lower, non-unit, B square) at the same sizes, GFLOPS counted as n³ per call; each
-call starts from a fresh copy of B, timed alike for all three.
+call starts from a fresh copy of B, timed alike for all three. With `gemm_par` it times `gemm_par` on
+`sh.sysl.sblas.threads.Spawned` at 1, 2, 4 and 6 workers against OpenBLAS set to the same number of
+threads (`openblas_set_num_threads`), n = 256 to 2048.
 
 OpenBLAS is loaded at run time from `$SYSL_OPENBLAS`, else Homebrew's
 `/opt/homebrew/opt/openblas/lib/libopenblas.dylib`, and pinned to one thread
@@ -188,3 +191,52 @@ SME, out of scope as the target.
 - **Kept**: B packed by vectors — a row-major B a row at a time, a column-major B V rows at a time
   transposed in registers (`zip1`/`zip2`); a whole column-major tile written back by vectors; trsm's
   leaf held a column at a time in registers.
+
+## gemm_par: Apple M5 Pro (6P + 12E), sysl 0.8.3, OpenBLAS 0.3.34, 2026-10-30
+
+`./bench gemm_par`: square column-major `C += A * B`, GFLOPS, median of seven interleaved trials of
+about 4e9 flops; sysl on `Spawned(threads)` (threads started per call), OpenBLAS on the same thread
+count. Load average 9.1 (1 min) at the start, 10.4 at the end.
+
+| type | n | threads | sysl | OpenBLAS | % OB |
+|---|---|---|---:|---:|---:|
+| f64 | 256 | 1 | 56.6 | 51.1 | 111 |
+| f64 | 256 | 2 | 76.6 | 81.3 | 94 |
+| f64 | 256 | 4 | 115.5 | 130.7 | 88 |
+| f64 | 256 | 6 | 124.4 | 164.3 | 76 |
+| f64 | 512 | 1 | 55.2 | 53.3 | 104 |
+| f64 | 512 | 2 | 89.1 | 97.3 | 92 |
+| f64 | 512 | 4 | 155.7 | 178.7 | 87 |
+| f64 | 512 | 6 | 200.7 | 240.8 | 83 |
+| f64 | 1024 | 1 | 54.8 | 53.4 | 103 |
+| f64 | 1024 | 2 | 97.2 | 103.3 | 94 |
+| f64 | 1024 | 4 | 172.1 | 190.1 | 91 |
+| f64 | 1024 | 6 | 240.4 | 264.3 | 91 |
+| f64 | 2048 | 1 | 56.6 | 53.5 | 106 |
+| f64 | 2048 | 2 | 97.4 | 100.9 | 96 |
+| f64 | 2048 | 4 | 189.3 | 204.1 | 93 |
+| f64 | 2048 | 6 | 264.7 | 288.6 | 92 |
+| f32 | 256 | 1 | 112.1 | 104.7 | 107 |
+| f32 | 256 | 2 | 128.7 | 150.1 | 86 |
+| f32 | 256 | 4 | 161.9 | 228.7 | 71 |
+| f32 | 256 | 6 | 147.4 | 214.6 | 69 |
+| f32 | 512 | 1 | 113.6 | 103.7 | 110 |
+| f32 | 512 | 2 | 188.0 | 190.9 | 98 |
+| f32 | 512 | 4 | 321.8 | 348.9 | 92 |
+| f32 | 512 | 6 | 420.7 | 433.4 | 97 |
+| f32 | 1024 | 1 | 114.3 | 105.2 | 109 |
+| f32 | 1024 | 2 | 210.7 | 201.2 | 105 |
+| f32 | 1024 | 4 | 358.2 | 376.3 | 95 |
+| f32 | 1024 | 6 | 488.5 | 512.3 | 95 |
+| f32 | 2048 | 1 | 116.8 | 107.8 | 108 |
+| f32 | 2048 | 2 | 204.2 | 203.7 | 100 |
+| f32 | 2048 | 4 | 374.4 | 389.5 | 96 |
+| f32 | 2048 | 6 | 528.8 | 533.7 | 99 |
+
+- **From n = 1024, 91–99% of OpenBLAS at 4 and 6 threads**, 4.3–4.7x gemm's own single thread at 6
+  (f64 264.7 against 56.6 GFLOPS at 2048). At one worker gemm_par is gemm's speed, 103–111% of
+  OpenBLAS.
+- **The small sizes trail (f64 76–88%, f32 69–71% at n = 256, 4–6 threads)**: `Spawned` starts and
+  joins a thread per job twice per KC x NC panel, and an n = 256 product takes about a quarter of a
+  millisecond at six threads, so the starts are a large share of it. A standing pool behind `Workers` is the way to
+  close it; the partition itself does not change.
