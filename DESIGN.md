@@ -177,9 +177,13 @@ package's, not one this library starts per call.
   one case with `y`'s starting value, and a test pins Accelerate's behaviour so a change in it shows.
 - **netlib**: the reference test programs (`dblat1.f`, `sblat1.f`, `dblat2.f`, `dblat3.f`) carry
   hand-derived expected values for small fixed inputs, including every stride sign; porting their
-  tables gives a check that depends on no vendor. Level 1's netlib edges — `rotg`'s sign conventions,
-  `iamax`'s ties and NaNs, `nrm2`'s scaling — are already tested against the definitions and against
-  Accelerate.
+  tables gives a check that depends on no vendor. Level 1's tables are ported in `netlib_tests.sysl`
+  (dot, axpy, rotg, rot, copy, swap, nrm2, asum, scal, iamax, at both widths, with netlib's
+  `SFAC`-scaled comparison and the scaling stress test for `nrm2`); its header records the source URLs
+  and SHA-256s. They agree with the package everywhere except one documented choice: netlib's
+  `i?amax` returns the first NaN wherever it is, this package's `iamax` never prefers a NaN unless it
+  is element 0, so those cases are checked against the package's definition. Negative strides agree
+  too: netlib's two-vector routines and its `nrm2` test walk them backwards as the views do.
 
 Every test runs under ASan as well (`SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`).
 
