@@ -5,12 +5,14 @@ import sh.sysl.sblas.{Real, Matrix, Workers, matrix, matrix_mut}
 import sh.sysl.sblas.heap.{gemm_alloc, gemm_par_alloc}
 import sysl.buf.{Buf, buf_filled}
 import sysl.sync.Atomic
+import sysl.threads.current
 
 // gemm_par on real threads against single-threaded gemm, every element of C's storage compared for
 // equality. The values are not short binary fractions, so a sum taken in another order shows. The
 // shapes are past every target's blocking: m beyond two MC blocks at both widths, k beyond two KC
 // slices, n beyond NC; the sweep over every blocking fringe at many worker counts is
-// `sh.sysl.sblas`'s own tests, on a pool that runs its jobs in reverse.
+// `sh.sysl.sblas`'s own tests, on a pool that runs its jobs in reverse. Each worker count's sweep runs
+// on one Team, so its threads serve every product of the sweep.
 
 private struct Noise
     state: u64
@@ -32,7 +34,7 @@ private noisy[T: Real](n: usize, g: *Noise) -> Buf[T]
 private view_of[T](data: []const T, rows: usize, cols: usize, transposed: bool) -> Matrix[T] =
     if transposed then matrix(data, cols, rows, cols + 3).t() else matrix(data, rows, cols, rows + 3)
 
-private check_threads[T: Real](workers: usize, m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_t: bool, b_t: bool)
+private check_threads[T: Real, W: Workers](workers: *W, m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_t: bool, b_t: bool)
     var g = Noise(seed * 2654435761 + 1)
     val a = noisy[T]((if a_t then m else k) * 3 + m * k + 3, &g)
     val b = noisy[T]((if b_t then k else n) * 3 + k * n + 3, &g)
@@ -46,7 +48,7 @@ private check_threads[T: Real](workers: usize, m: usize, n: usize, k: usize, alp
     val av = view_of(a.view(), m, k, a_t)
     val bv = view_of(b.view(), k, n, b_t)
     gemm_alloc(alpha, av, bv, beta, matrix_mut(c.view(), m, n, m + 3))
-    gemm_par_alloc(&Spawned(workers), alpha, av, bv, beta, matrix_mut(c1.view(), m, n, m + 3))
+    gemm_par_alloc(workers, alpha, av, bv, beta, matrix_mut(c1.view(), m, n, m + 3))
     for i in 0..<c.len()
         assert(c[i] == c1[i] || (c[i].is_nan() && c1[i].is_nan()), "gemm_par on threads differs from gemm")
     if beta == T.zero()
@@ -56,36 +58,120 @@ private check_threads[T: Real](workers: usize, m: usize, n: usize, k: usize, alp
 
 private val workers: [5]usize = [1, 2, 3, 6, 7]
 
-private sweep[T: Real](seed: u64)
+// m = 1, 5 and 9 give fewer row blocks than six or seven workers, so some jobs have no tile.
+private shapes[T: Real, W: Workers](on: *W, seed: u64)
+    check_threads[T](on, 0, 5, 7, T.one(), T.zero(), seed, false, false)
+    check_threads[T](on, 5, 7, 0, T.one(), T(1) / T(3), seed, false, false)
+    check_threads[T](on, 1, 1, 1, T(3) / T(7), T.one(), seed, true, true)
+    check_threads[T](on, 37, 29, 19, T(3) / T(7), T(-5) / T(11), seed, true, false)
+    check_threads[T](on, 517, 43, 1100, T(-2) / T(3), T.zero(), seed + 1, false, true)
+    check_threads[T](on, 9, 61, 3, T.zero(), T(7) / T(5), seed + 2, false, false)
+
+private sweep_team[T: Real](seed: u64)
     var s = seed
     for w in workers
-        check_threads[T](w, 0, 5, 7, T.one(), T.zero(), s, false, false)
-        check_threads[T](w, 5, 7, 0, T.one(), T(1) / T(3), s, false, false)
-        check_threads[T](w, 1, 1, 1, T(3) / T(7), T.one(), s, true, true)
-        check_threads[T](w, 37, 29, 19, T(3) / T(7), T(-5) / T(11), s, true, false)
-        check_threads[T](w, 517, 43, 1100, T(-2) / T(3), T.zero(), s + 1, false, true)
-        check_threads[T](w, 9, 61, 3, T.zero(), T(7) / T(5), s + 2, false, false)
+        team(w, (t) -> shapes[T](t, s))
         s += 3
 
-@test("gemm_par on 1, 2, 3, 6 and 7 threads is bitwise gemm, f64")
-threads_f64()
-    sweep[f64](11)
+private sweep_spawned[T: Real](seed: u64)
+    var s = seed
+    for w in workers
+        shapes[T](&Spawned(w), s)
+        s += 3
 
-@test("gemm_par on 1, 2, 3, 6 and 7 threads is bitwise gemm, f32")
-threads_f32()
-    sweep[f32](12)
+@test("gemm_par on a Team of 1, 2, 3, 6 and 7 is bitwise gemm, f64")
+team_f64()
+    sweep_team[f64](11)
+
+@test("gemm_par on a Team of 1, 2, 3, 6 and 7 is bitwise gemm, f32")
+team_f32()
+    sweep_team[f32](12)
+
+@test("gemm_par on 1, 2, 3, 6 and 7 Spawned threads is bitwise gemm, f64")
+spawned_f64()
+    sweep_spawned[f64](13)
+
+@test("gemm_par on 1, 2, 3, 6 and 7 Spawned threads is bitwise gemm, f32")
+spawned_f32()
+    sweep_spawned[f32](14)
 
 @test("gemm_par on threads is bitwise gemm past NC columns and with transposes on both sides")
 threads_wide()
-    check_threads[f64](4, 13, 3100, 5, 0.5, 0.25, 21, true, true)
-    check_threads[f32](3, 33, 3100, 9, 0.5, 1.0, 22, false, true)
+    team(4, (t) -> check_threads[f64](t, 13, 3100, 5, 0.5, 0.25, 21, true, true))
+    team(3, (t) -> check_threads[f32](t, 33, 3100, 9, 0.5, 1.0, 22, false, true))
+    check_threads[f64](&Spawned(4), 13, 3100, 5, 0.5, 0.25, 23, true, true)
 
-@test("Spawned runs every job once, each with its own number")
+@test("one Team serves many gemm_par calls of both widths, mixed shapes, in one body")
+team_reused()
+    team(6, (t) ->
+        for round in 0..<8
+            check_threads[f64](t, 37 + round, 29, 19 + round * 40, 0.75, 0.5, 31 + round, round % 2 == 0, false)
+            check_threads[f32](t, 3, 70 + round, 5, 1.5, 0.0, 41 + round, false, round % 3 == 0))
+
+@test("team answers what its body answered")
+team_answers_body()
+    assert(team(3, (t) -> t.count() * 10 + 1) == 31)
+    assert(team(1, (t) -> t.count()) == 1)
+
+private val callers: usize = 7
+
+// Every job once per call with its own number, job 0 on the caller, each other job on a thread that
+// is neither the caller's nor another job's.
+private check_each[W: Workers](on: *W, calls: usize)
+    val me = current().id
+    var hits: [7]Atomic[int] = [Atomic(0); 7]
+    var ids: [7]Atomic[u64] = [Atomic(0); 7]
+    val v = hits[..]
+    val who = ids[..]
+    val w = on.count()
+    for _ in 0..<calls
+        on.each((i) ->
+            v[i].add(1 + int(i))
+            who[i].store(current().id))
+        assert(who[0].load() == me, "job 0 ran off the calling thread")
+        for i in 1..<w
+            assert(who[i].load() != me, "a job past the first ran on the calling thread")
+            for j in 1..<i
+                assert(who[i].load() != who[j].load(), "two jobs ran on one thread")
+    for i in 0..<callers
+        assert(hits[i].load() == (if i < w then int(calls) * (1 + int(i)) else 0))
+
+@test("Spawned runs every job once per call, each with its own number, job 0 on the caller")
 spawned_runs_each_job_once()
     for w in workers
-        var hits: [7]Atomic[int] = [Atomic(0); 7]
-        val v = hits[..]
-        var pool = Spawned(w)
-        pool.each((i) -> v[i].add(1 + int(i)))
-        for i in 0..<7
-            assert(hits[i].load() == (if i < w then 1 + int(i) else 0))
+        check_each(&Spawned(w), 3)
+
+@test("a Team runs every job once per call for 500 calls, each with its own number, job 0 on the caller")
+team_runs_each_job_once()
+    for w in workers
+        team(w, (t) -> check_each(t, 500))
+
+@test("a Team runs job w on the same thread in every call")
+team_keeps_its_threads()
+    team(4, (t) ->
+        var first: [4]Atomic[u64] = [Atomic(0); 4]
+        var again: [4]Atomic[u64] = [Atomic(0); 4]
+        val f = first[..]
+        val g = again[..]
+        t.each((i) -> f[i].store(current().id))
+        for _ in 0..<50
+            t.each((i) -> g[i].store(current().id))
+            for i in 0..<4
+                assert(g[i].load() == f[i].load(), "a Team ran a job on a new thread"))
+
+@test("a Team whose body never calls each still finishes")
+team_idle()
+    for w in workers
+        team(w, (_) -> ())
+
+@test("a Team of no workers traps", should_trap: "a team needs at least one worker")
+team_of_none()
+    team(0, (_) -> ())
+
+@test("a job that panics on a Team's thread stops the program", should_trap: "job 2 failed", timeout: 30)
+team_job_panics()
+    team(4, (t) -> t.each((i) -> if i == 2 then panic("job 2 failed")))
+
+@test("a job that panics on the calling thread stops the program", should_trap: "job 0 failed", timeout: 30)
+team_caller_job_panics()
+    team(4, (t) -> t.each((i) -> if i == 0 then panic("job 0 failed")))

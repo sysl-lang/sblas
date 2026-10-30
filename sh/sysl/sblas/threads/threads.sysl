@@ -1,37 +1,97 @@
 module sh.sysl.sblas.threads
 
 import sh.sysl.sblas.Workers
-import sysl.threads.{Thread, spawn}
+import sysl.threads.{Barrier, Mutex, barrier, scope}
 
-// Workers for gemm_par over sysl.threads, which has no pool: each call of `each` starts a thread per
-// job past the first, runs the first on the calling thread, and joins the rest. Starting threads per
-// call costs some tens of microseconds, which a large gemm does not notice; a program that runs many
-// small ones keeps a pool of its own and implements `Workers` for it the same way.
+// Workers for gemm_par over sysl.threads, in two forms.
+//
+// A `Team` starts its threads once and keeps them for as long as the body `team` lends it runs: they
+// sleep on a barrier between calls of `each`, and every `each` of every gemm_par in the body reuses
+// them, so a call costs two barrier meetings rather than a thread start per job. It is the one to use.
+//
+// `Spawned` starts a thread per job on every `each`, on a `scope` of its own, and needs no body around
+// the product: `gemm_par(&Spawned(4), …)` anywhere. Starting threads costs some tens of microseconds a
+// call, which a large product does not notice and a run of small ones does.
+//
+// Both run job 0 on the calling thread, which sleeps meanwhile in neither.
+
+/** `n` workers, the calling thread and `n - 1` threads `team` started for its body:
+ * `team(4, (t) -> gemm_par(t, …))`. One `each` runs at a time, called by the thread that runs the
+ * body; a job that calls `each` on its own team waits for ever.
+ */
+struct Team
+    private n: usize
+    private crew: &sync Crew
+
+/** What the team's threads share with the calling thread: the barrier that starts a call and the one
+ * that ends it, and the job between them, `None` once the body has finished and the threads should go.
+ */
+private struct Crew
+    start: &sync Barrier
+    done: &sync Barrier
+    job: Mutex[Option[&sync Fn(usize) -> unit]]
+
+/** Runs `body` with a team of `n` workers, and answers what `body` answered once every thread the team
+ * started has finished. An `n` of one starts no thread; an `n` of zero traps.
+ */
+team[R](n: usize, body: *Team -> R) -> R
+    assert(n >= 1, "a team needs at least one worker")
+    val crew: &sync Crew = Crew(barrier(n), barrier(n), Mutex.new(None))
+    scope((s) ->
+        for w in 1..<n
+            s.spawn(() -> serve(crew, w))
+        var t = Team(n, crew)
+        val r = body(&t)
+        crew.job.with((j) -> *j = None)
+        crew.start.wait()
+        r)
+
+// One of the team's threads: meets the calling thread at `start`, runs its job, and meets it again at
+// `done`, until a `start` finds no job.
+private serve(crew: &sync Crew, w: usize)
+    while run_one(crew, w)
+        crew.done.wait()
+
+// Waits for a call and runs this worker's job in it; false when the body has finished instead. The job
+// is let go before the worker meets `done`, so nothing holds it once `each` returns.
+private run_one(crew: &sync Crew, w: usize) -> bool
+    crew.start.wait()
+    crew.job.with((j) -> *j) match
+        Some(job) ->
+            job(w)
+            true
+        None -> false
+
+impl Workers for Team
+    count(*self) -> usize = self.n
+
+    /** Hands `job` to the team's threads, runs `job(0)` here meanwhile, and returns once every one of
+     * them has finished it.
+     */
+    @scoped(job)
+    each(*self, job: &sync Fn(usize) -> unit)
+        if self.n == 1
+            job(0)
+            return
+        self.crew.job.with((j) -> *j = Some(job))
+        self.crew.start.wait()
+        job(0)
+        self.crew.done.wait()
+        self.crew.job.with((j) -> *j = None)
 
 /** `n` workers, each a thread started for the call: `gemm_par(&Spawned(4), …)`. */
 struct Spawned
     n: usize
 
-/** One job and the worker number it runs with: what a started thread is handed. */
-private struct Job
-    run: &sync Fn(usize) -> unit
-    w: usize
-
-private start(j: *Job) = j.run(j.w)
-
 impl Workers for Spawned
     count(*self) -> usize = self.n
 
     /** Runs `job(0)` here and every other job on a thread of its own, and returns once all are done.
-     * A job whose thread could not be started runs here too, after the first.
+     * Where the system will not start a thread the program stops with a message.
      */
     @scoped(job)
     each(*self, job: &sync Fn(usize) -> unit)
-        var jobs: []Job = [Job(job, 0); self.n]
-        var pool: []Option[Thread] = [None; self.n]
-        for w in 1..<self.n
-            jobs[w].w = w
-            pool[w] = spawn(&start, &jobs[w])
-        job(0)
-        for w in 1..<self.n
-            if pool[w] is Some(t) then t.join() else job(w)
+        scope((s) ->
+            for w in 1..<self.n
+                s.spawn(() -> job(w))
+            job(0))

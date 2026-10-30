@@ -1,6 +1,6 @@
 import sh.sysl.sblas.*
 import sh.sysl.cblas.{Oracle, Lib, libs, ob_set_threads}
-import sh.sysl.sblas.threads.Spawned
+import sh.sysl.sblas.threads.{Spawned, team}
 import sh.sysl.sblas_pool.PoolWorkers
 import sh.sysl.pool.Pool
 import sysl.math.max
@@ -194,24 +194,25 @@ private bench_gemm_par[T: Oracle](name: string)
         val one = T.one()
         val nn = i32(n)
         for w in par_threads
-            var spawned = Spawned(w)
             var pooled = PoolWorkers(Pool.new(max(w - 1, 1)), w)
             val len = gemm_par_work_len[T](n, n, n, w)
             val pa = fill[T](len.a)
             val pb = fill[T](len.b)
             ob_set_threads(i32(w))
-            var rates: [3][trials]f64
-            for t in 0..<trials
-                rates[0][t] = time_par(&spawned, n, reps, a.view(), b.view(), c.view(), pa.view(), pb.view())
-                rates[1][t] = time_par(&pooled, n, reps, a.view(), b.view(), c.view(), pa.view(), pb.view())
-                val t1 = monotonic().us
-                for _ in 0..<reps
-                    T.o_gemm(Lib.OpenBLAS, false, false, nn, nn, nn, one, as_mut_ptr(black_box(a.view())), nn, as_mut_ptr(black_box(b.view())), nn, one, as_mut_ptr(black_box(c.view())), nn)
-                rates[2][t] = flops * f64(reps) / (f64(monotonic().us - t1) * 1e-6) * 1e-9
-            val spawn = median(rates[0][..])
+            var rates = team(w, (tm) ->
+                var r: [3][trials]f64
+                for t in 0..<trials
+                    r[0][t] = time_par(tm, n, reps, a.view(), b.view(), c.view(), pa.view(), pb.view())
+                    r[1][t] = time_par(&pooled, n, reps, a.view(), b.view(), c.view(), pa.view(), pb.view())
+                    val t1 = monotonic().us
+                    for _ in 0..<reps
+                        T.o_gemm(Lib.OpenBLAS, false, false, nn, nn, nn, one, as_mut_ptr(black_box(a.view())), nn, as_mut_ptr(black_box(b.view())), nn, one, as_mut_ptr(black_box(c.view())), nn)
+                    r[2][t] = flops * f64(reps) / (f64(monotonic().us - t1) * 1e-6) * 1e-9
+                r)
+            val tm = median(rates[0][..])
             val pool = median(rates[1][..])
             val ob = median(rates[2][..])
-            print(f"| ${name} | ${n} | ${w} | ${spawn}%.1f | ${pool}%.1f | ${ob}%.1f | ${100.0 * spawn / ob}%.0f | ${100.0 * pool / ob}%.0f |")
+            print(f"| ${name} | ${n} | ${w} | ${tm}%.1f | ${pool}%.1f | ${ob}%.1f | ${100.0 * tm / ob}%.0f | ${100.0 * pool / ob}%.0f |")
     ob_set_threads(1)
 
 /** Microseconds one `each` of jobs that do nothing takes on `workers`: the start and the barrier
@@ -230,7 +231,8 @@ private bench_each()
     for w in par_threads
         var spawned = Spawned(w)
         var pooled = PoolWorkers(Pool.new(max(w - 1, 1)), w)
-        print(f"| ${w} | ${time_each(&spawned)}%.2f | ${time_each(&pooled)}%.2f |")
+        val on_team = team(w, (tm) -> time_each(tm))
+        print(f"| ${w} | ${time_each(&spawned)}%.2f | ${on_team}%.2f | ${time_each(&pooled)}%.2f |")
 
 // --- trsm ------------------------------------------------------------------------------------------
 
@@ -423,16 +425,16 @@ main(args: []string)
         bench_gemm[f32]("f32")
         return
     if args.len > 1 && args[1] == "gemm_par"
-        print(f"GFLOPS, square column-major C += A * B, median of ${trials} interleaved trials: sysl gemm_par on Spawned(threads) and on a standing Pool(threads), OpenBLAS on the same thread count, and each sysl as % of OpenBLAS")
-        print("| type | n | threads | Spawned | pool | OpenBLAS | Spawned % OB | pool % OB |")
+        print(f"GFLOPS, square column-major C += A * B, median of ${trials} interleaved trials: sysl gemm_par on a team(threads) and on PoolWorkers over a standing Pool, OpenBLAS on the same thread count, and each sysl as % of OpenBLAS")
+        print("| type | n | threads | Team | pool | OpenBLAS | Team % OB | pool % OB |")
         print("|---|---|---|---:|---:|---:|---:|---:|")
         bench_gemm_par[f64]("f64")
         bench_gemm_par[f32]("f32")
         return
     if args.len > 1 && args[1] == "each"
         print(f"Microseconds per Workers.each of empty jobs, median of ${trials} runs of 20000 calls")
-        print("| workers | Spawned | pool |")
-        print("|---:|---:|---:|")
+        print("| workers | Spawned | Team | pool |")
+        print("|---:|---:|---:|---:|")
         bench_each()
         return
     if args.len > 1 && args[1] == "trsm"

@@ -455,7 +455,7 @@ syrk[T: Real](uplo: Uplo, alpha: T, a: Matrix[T], beta: T, c: MatrixMut[T], work
  *
  * An implementation marks its `each` `@scoped(job)` — the promise that every job has finished when
  * `each` returns — which is what lets gemm's jobs borrow the matrices rather than share them.
- * `sh.sysl.sblas.threads.Spawned` is one over `sysl.threads`.
+ * `sh.sysl.sblas.threads` has two over `sysl.threads`: a `Team` of standing threads, and `Spawned`.
  */
 trait Workers
     /** How many jobs `each` runs; at least one. */
