@@ -1,5 +1,6 @@
 import sh.sysl.sblas.*
-import sh.sysl.cblas.{Oracle, Lib, libs}
+import sh.sysl.cblas.{Oracle, Lib, libs, ob_set_threads}
+import sh.sysl.sblas.threads.Spawned
 import sysl.slices.{as_mut_ptr, sort_by}
 import sysl.time.monotonic
 import sysl.hint.black_box
@@ -166,6 +167,42 @@ private bench_gemm[T: Oracle](name: string)
         val ob = median(rates[2][..])
         print(f"| ${name} | gemm | ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
+// --- gemm_par --------------------------------------------------------------------------------------
+
+/** Threaded gemm sizes, and the worker counts each runs at, OpenBLAS at the same thread count. */
+private val par_sizes: [4]usize = [256, 512, 1024, 2048]
+private val par_threads: [4]usize = [1, 2, 4, 6]
+
+private bench_gemm_par[T: Oracle](name: string)
+    for n in par_sizes
+        val a = fill[T](n * n)
+        val b = fill[T](n * n)
+        val c = fill[T](n * n)
+        val flops = 2.0 * f64(n) * f64(n) * f64(n)
+        val reps = int(gemm_work / flops) + 1
+        val one = T.one()
+        val nn = i32(n)
+        for w in par_threads
+            var pool = Spawned(w)
+            val len = gemm_par_work_len[T](n, n, n, w)
+            val pa = fill[T](len.a)
+            val pb = fill[T](len.b)
+            ob_set_threads(i32(w))
+            var rates: [2][trials]f64
+            for t in 0..<trials
+                val t0 = monotonic().us
+                for _ in 0..<reps
+                    gemm_par(&pool, one, matrix(black_box(a.view()), n, n, n), matrix(black_box(b.view()), n, n, n), one, matrix_mut(black_box(c.view()), n, n, n), GemmWork(pa.view(), pb.view()))
+                rates[0][t] = flops * f64(reps) / (f64(monotonic().us - t0) * 1e-6) * 1e-9
+                val t1 = monotonic().us
+                for _ in 0..<reps
+                    T.o_gemm(Lib.OpenBLAS, false, false, nn, nn, nn, one, as_mut_ptr(black_box(a.view())), nn, as_mut_ptr(black_box(b.view())), nn, one, as_mut_ptr(black_box(c.view())), nn)
+                rates[1][t] = flops * f64(reps) / (f64(monotonic().us - t1) * 1e-6) * 1e-9
+            val ours = median(rates[0][..])
+            val ob = median(rates[1][..])
+            print(f"| ${name} | ${n} | ${w} | ${ours}%.1f | ${ob}%.1f | ${100.0 * ours / ob}%.0f |")
+    ob_set_threads(1)
+
 // --- trsm ------------------------------------------------------------------------------------------
 
 /** One `b := a⁻¹ b` with `a` lower triangular, non-unit, `n` x `n` like `b`, by implementation `who`. */
@@ -268,7 +305,7 @@ private bench_level2[T: Oracle](name: string)
             val ob = median(rates[2][..])
             print(f"| ${name} | ${op.name()} | ${places[k]} ${n}x${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
-/** With no argument, Levels 1 and 2; with `gemm` or `trsm`, that routine alone. */
+/** With no argument, Levels 1 and 2; with `gemm`, `gemm_par` or `trsm`, that routine alone. */
 main(args: []string)
     if args.len > 1 && args[1] == "gemm"
         print(f"GFLOPS, square column-major C += A * B, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
@@ -276,6 +313,13 @@ main(args: []string)
         print("|---|---|---|---:|---:|---:|---:|---:|")
         bench_gemm[f64]("f64")
         bench_gemm[f32]("f32")
+        return
+    if args.len > 1 && args[1] == "gemm_par"
+        print(f"GFLOPS, square column-major C += A * B, median of ${trials} interleaved trials: sysl gemm_par on Spawned(threads), OpenBLAS on the same thread count, and sysl as % of OpenBLAS")
+        print("| type | n | threads | sysl | OpenBLAS | % OB |")
+        print("|---|---|---|---:|---:|---:|")
+        bench_gemm_par[f64]("f64")
+        bench_gemm_par[f32]("f32")
         return
     if args.len > 1 && args[1] == "trsm"
         print(f"GFLOPS (n³ per call), square column-major B := A⁻¹ B, A lower non-unit, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")

@@ -1,6 +1,6 @@
 module sh.sysl.sblas.heap
 
-import sh.sysl.sblas.{Real, Matrix, MatrixMut, GemmWork, Side, Uplo, Diag, gemm, gemm_work_len, trsm, trsm_work_len}
+import sh.sysl.sblas.{Real, Matrix, MatrixMut, GemmWork, Side, Uplo, Diag, Workers, gemm, gemm_work_len, gemm_par, gemm_par_work_len, trsm, trsm_work_len}
 import sysl.buf.{Buf, buf_filled}
 
 // The routines of sh.sysl.sblas that need scratch storage, in the form that allocates it per call.
@@ -15,6 +15,15 @@ gemm_alloc[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
     gemm(alpha, a, b, beta, c, GemmWork(pa.view(), pb.view()))
+
+/** `c := alpha * a * b + beta * c` on the caller's `workers`, as `sh.sysl.sblas.gemm_par`, with packing
+ * buffers allocated for the call and freed after it.
+ */
+gemm_par_alloc[T: Real, W: Workers](workers: *W, alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T])
+    val len = gemm_par_work_len[T](c.rows, c.cols, a.cols, workers.count())
+    val pa: Buf[T] = buf_filled(len.a, T.zero())
+    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    gemm_par(workers, alpha, a, b, beta, c, GemmWork(pa.view(), pb.view()))
 
 /** The triangular solve of `sh.sysl.sblas.trsm`, with packing buffers allocated for the call and freed
  * after it.

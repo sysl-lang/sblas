@@ -1,0 +1,91 @@
+module sh.sysl.sblas.threads
+@tests
+
+import sh.sysl.sblas.{Real, Matrix, Workers, matrix, matrix_mut}
+import sh.sysl.sblas.heap.{gemm_alloc, gemm_par_alloc}
+import sysl.buf.{Buf, buf_filled}
+import sysl.sync.Atomic
+
+// gemm_par on real threads against single-threaded gemm, every element of C's storage compared for
+// equality. The values are not short binary fractions, so a sum taken in another order shows. The
+// shapes are past every target's blocking: m beyond two MC blocks at both widths, k beyond two KC
+// slices, n beyond NC; the sweep over every blocking fringe at many worker counts is
+// `sh.sysl.sblas`'s own tests, on a pool that runs its jobs in reverse.
+
+private struct Noise
+    state: u64
+
+impl Noise
+    next(*self) -> u64
+        self.state ^= self.state << 13
+        self.state ^= self.state >> 7
+        self.state ^= self.state << 17
+        self.state
+
+private noisy[T: Real](n: usize, g: *Noise) -> Buf[T]
+    val b: Buf[T] = buf_filled(n, T.zero())
+    for i in 0..<n
+        b[i] = T(int(g.next() >> 44) - 524288) / T(4099)
+    b
+
+/** A column-major `rows` x `cols` with leading dimension `rows + 3`, or the transpose of one. */
+private view_of[T](data: []const T, rows: usize, cols: usize, transposed: bool) -> Matrix[T] =
+    if transposed then matrix(data, cols, rows, cols + 3).t() else matrix(data, rows, cols, rows + 3)
+
+private check_threads[T: Real](workers: usize, m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_t: bool, b_t: bool)
+    var g = Noise(seed * 2654435761 + 1)
+    val a = noisy[T]((if a_t then m else k) * 3 + m * k + 3, &g)
+    val b = noisy[T]((if b_t then k else n) * 3 + k * n + 3, &g)
+    val c = noisy[T]((m + 3) * n + 1, &g)
+    if beta == T.zero()
+        for i in 0..<c.len()
+            c[i] = T.nan()
+    val c1: Buf[T] = buf_filled(c.len(), T.zero())
+    for i in 0..<c.len()
+        c1[i] = c[i]
+    val av = view_of(a.view(), m, k, a_t)
+    val bv = view_of(b.view(), k, n, b_t)
+    gemm_alloc(alpha, av, bv, beta, matrix_mut(c.view(), m, n, m + 3))
+    gemm_par_alloc(&Spawned(workers), alpha, av, bv, beta, matrix_mut(c1.view(), m, n, m + 3))
+    for i in 0..<c.len()
+        assert(c[i] == c1[i] || (c[i].is_nan() && c1[i].is_nan()), "gemm_par on threads differs from gemm")
+    if beta == T.zero()
+        for j in 0..<n
+            for i in 0..<m
+                assert(!c1[i + j * (m + 3)].is_nan(), "gemm_par on threads left a NaN in C with beta zero")
+
+private val workers: [5]usize = [1, 2, 3, 6, 7]
+
+private sweep[T: Real](seed: u64)
+    var s = seed
+    for w in workers
+        check_threads[T](w, 0, 5, 7, T.one(), T.zero(), s, false, false)
+        check_threads[T](w, 5, 7, 0, T.one(), T(1) / T(3), s, false, false)
+        check_threads[T](w, 1, 1, 1, T(3) / T(7), T.one(), s, true, true)
+        check_threads[T](w, 37, 29, 19, T(3) / T(7), T(-5) / T(11), s, true, false)
+        check_threads[T](w, 517, 43, 1100, T(-2) / T(3), T.zero(), s + 1, false, true)
+        check_threads[T](w, 9, 61, 3, T.zero(), T(7) / T(5), s + 2, false, false)
+        s += 3
+
+@test("gemm_par on 1, 2, 3, 6 and 7 threads is bitwise gemm, f64")
+threads_f64()
+    sweep[f64](11)
+
+@test("gemm_par on 1, 2, 3, 6 and 7 threads is bitwise gemm, f32")
+threads_f32()
+    sweep[f32](12)
+
+@test("gemm_par on threads is bitwise gemm past NC columns and with transposes on both sides")
+threads_wide()
+    check_threads[f64](4, 13, 3100, 5, 0.5, 0.25, 21, true, true)
+    check_threads[f32](3, 33, 3100, 9, 0.5, 1.0, 22, false, true)
+
+@test("Spawned runs every job once, each with its own number")
+spawned_runs_each_job_once()
+    for w in workers
+        var hits: [7]Atomic[int] = [Atomic(0); 7]
+        val v = hits[..]
+        var pool = Spawned(w)
+        pool.each((i) -> v[i].add(1 + int(i)))
+        for i in 0..<7
+            assert(hits[i].load() == (if i < w then 1 + int(i) else 0))

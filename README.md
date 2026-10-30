@@ -6,7 +6,7 @@ allocation, and it builds for bare-metal targets.
 
 Level 1 is here, generic over `f32` and `f64`: `axpy`, `dot`, `nrm2` (Blue's overflow- and
 underflow-safe algorithm), `asum`, `scal`, `copy`, `swap`, `iamax`, `rot`, `rotg`. Level 2 has begun: `gemv` (and, through `a.t()`, its transpose) and `ger`.
-Level 3 has `gemm` and `trsm`. The rest of Level 2 and Level 3 are designed in [DESIGN.md](DESIGN.md).
+Level 3 has `gemm`, its threaded form `gemm_par`, and `trsm`. The rest of Level 2 and Level 3 are designed in [DESIGN.md](DESIGN.md).
 
 ```sysl
 import sh.sysl.sblas.*
@@ -56,6 +56,21 @@ var pb: [64]f64
 gemm(1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa[..], pb[..]))  // c = a aᵀ = [14, 32, 32, 77]
 ```
 
+`gemm_par` is the same product on the caller's workers, and gives the same C bit for bit whatever
+their number. The package starts no thread: it takes any value implementing `Workers` (`count`, and
+`each`, which runs `job(0)` … `job(count - 1)` and returns when all are done), and
+`gemm_par_work_len` sizes the buffers, a block of A per worker. `sh.sysl.sblas.threads.Spawned(n)`
+is a `Workers` over `sysl.threads` that starts its threads per call — fine for large products, and
+short enough (`sh/sysl/sblas/threads/threads.sysl`) to copy onto a standing pool of your own:
+
+```sysl
+import sh.sysl.sblas.heap.gemm_par_alloc
+import sh.sysl.sblas.threads.Spawned
+
+var pool = Spawned(6)
+gemm_par_alloc(&pool, 1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2))  // the same c, on six threads
+```
+
 `trsm` solves a triangular system in place for every column of B at once — `b := alpha a⁻¹ b` on the
 `Left`, `b := alpha b a⁻¹` on the `Right` — with the same packing buffers (`trsm_work_len`). `Uplo`
 names the triangle of the view as passed, so the transpose of an upper triangle is `Lower`:
@@ -73,17 +88,18 @@ dependencies {
 }
 ```
 
-Needs sysl 0.8.2.
+Needs sysl 0.8.3.
 
 ## Layout
 
 | directory | what |
 |---|---|
-| `sh/sysl/sblas/` | the package — `sblas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range and band edges, `rotg`'s signs, `iamax`'s ties and NaNs across lanes and chunks, every length around the vector width, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary, `trsm` solved by hand and multiplied back across them) |
-| `sh/sysl/sblas/heap/` | `gemm_alloc`, `trsm_alloc`: gemm and trsm with their packing buffers allocated per call (the main module is `@no_alloc`) |
+| `sh/sysl/sblas/` | the package — `sblas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range and band edges, `rotg`'s signs, `iamax`'s ties and NaNs across lanes and chunks, every length around the vector width, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary, `gemm_par` bitwise equal to it at every boundary and worker count, `trsm` solved by hand and multiplied back across them) |
+| `sh/sysl/sblas/heap/` | `gemm_alloc`, `gemm_par_alloc`, `trsm_alloc`: the Level 3 routines with their packing buffers allocated per call (the main module is `@no_alloc`) |
+| `sh/sysl/sblas/threads/` | `Spawned(n)`: `Workers` for `gemm_par` over `sysl.threads`, a thread per job per call, and its tests on real threads (it requires `os`, which the rest does not) |
 | `sh/sysl/sblas/netlib_tests.sysl` | netlib's own Level 1 test tables (`dblat1.f`, `sblat1.f`) ported: the fixed vectors and expected results at every stride in them, with netlib's `SFAC`-scaled comparison |
 | `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign, transpose and shape |
-| `bench/` | GB/s of every contiguous Level 1 routine, GFLOPS of `gemv` and `ger`, and with `gemm` or `trsm` as its argument that routine's GFLOPS, against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
+| `bench/` | GB/s of every contiguous Level 1 routine, GFLOPS of `gemv` and `ger`, and with `gemm`, `gemm_par` or `trsm` as its argument that routine's GFLOPS, against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
 
 ## Speed
 

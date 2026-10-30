@@ -1,0 +1,37 @@
+module sh.sysl.sblas.threads
+
+import sh.sysl.sblas.Workers
+import sysl.threads.{Thread, spawn}
+
+// Workers for gemm_par over sysl.threads, which has no pool: each call of `each` starts a thread per
+// job past the first, runs the first on the calling thread, and joins the rest. Starting threads per
+// call costs some tens of microseconds, which a large gemm does not notice; a program that runs many
+// small ones keeps a pool of its own and implements `Workers` for it the same way.
+
+/** `n` workers, each a thread started for the call: `gemm_par(&Spawned(4), …)`. */
+struct Spawned
+    n: usize
+
+/** One job and the worker number it runs with: what a started thread is handed. */
+private struct Job
+    run: &sync Fn(usize) -> unit
+    w: usize
+
+private start(j: *Job) = j.run(j.w)
+
+impl Workers for Spawned
+    count(*self) -> usize = self.n
+
+    /** Runs `job(0)` here and every other job on a thread of its own, and returns once all are done.
+     * A job whose thread could not be started runs here too, after the first.
+     */
+    @scoped(job)
+    each(*self, job: &sync Fn(usize) -> unit)
+        var jobs: []Job = [Job(job, 0); self.n]
+        var pool: []Option[Thread] = [None; self.n]
+        for w in 1..<self.n
+            jobs[w].w = w
+            pool[w] = spawn(&start, &jobs[w])
+        job(0)
+        for w in 1..<self.n
+            if pool[w] is Some(t) then t.join() else job(w)

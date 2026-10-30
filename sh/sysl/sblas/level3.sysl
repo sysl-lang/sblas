@@ -343,6 +343,119 @@ gemm[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], wo
     assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
     gemm_blocked[T, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](alpha, a, b, beta, c, work)
 
+// --- Threads ---------------------------------------------------------------------------------------
+//
+// gemm_par runs the same five loops on the caller's workers. For each KC x NC panel of B it asks them
+// twice: once to pack the panel, each job a run of its NR-wide panels into the shared buffer, and once
+// to compute, each job a block of the panel's tiles — a run of whole MR row panels by a run of whole NR
+// column panels — packing its own rows of A into its own slice of the A buffer. The return of each
+// `each` is the barrier between the two. Every run starts on a multiple of MR or NR, and MC is a
+// multiple of MR, so each tile of C is packed, multiplied and summed over k exactly as gemm does it:
+// the result is bitwise the same for any number of workers.
+
+/** The workers gemm_par runs its jobs on: the caller's pool, since this module starts no thread.
+ *
+ * An implementation marks its `each` `@scoped(job)` — the promise that every job has finished when
+ * `each` returns — which is what lets gemm's jobs borrow the matrices rather than share them.
+ * `sh.sysl.sblas.threads.Spawned` is one over `sysl.threads`.
+ */
+trait Workers
+    /** How many jobs `each` runs; at least one. */
+    count(*self) -> usize
+
+    /** Runs `job(0)`, `job(1)`, …, `job(count() - 1)`, at once where it can, and returns when every
+     * one of them has finished.
+     */
+    each(*self, job: &sync Fn(usize) -> unit)
+
+/** The buffer sizes gemm_par needs on `workers` workers for the same problem as `gemm_work_len`: a
+ * block of A for each worker, and the one shared panel of B.
+ */
+gemm_par_work_len[T: Real](m: usize, n: usize, k: usize, workers: usize) -> GemmWorkLen
+    val one = gemm_work_len[T](m, n, k)
+    GemmWorkLen(one.a * workers, one.b)
+
+/** Run `w` of `parts` near-equal runs over `units`, as its first unit and the one past its last. */
+private run_of(units: usize, parts: usize, w: usize) -> (usize, usize) = (w * units / parts, (w + 1) * units / parts)
+
+/** The `tm` x `tn` grid of row runs by column runs, `tm * tn <= count`, over `pm` row panels and `pn`
+ * column panels that makes the largest block smallest; of equal ones, the one with more row runs.
+ */
+private[sblas] par_grid(count: usize, pm: usize, pn: usize) -> (usize, usize)
+    var best: (usize, usize) = (1, 1)
+    var most = pm * pn
+    for tm in 1..min(count, pm)
+        val tn = min(count / tm, pn)
+        val size = (pm + tm - 1) / tm * ((pn + tn - 1) / tn)
+        if size <= most
+            best = (tm, tn)
+            most = size
+    best
+
+private gemm_par_blocked[T: Real, W: Workers, const V: usize, const MV: usize, const NR: usize, const TILE: usize, const KC: usize, const MC: usize, const NC: usize](workers: *W, alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+    val m = c.rows
+    val n = c.cols
+    val k = a.cols
+    val count = workers.count()
+    val need = work_len[T, V * MV, NR, KC, MC, NC](m, n, k)
+    assert(work.a.len >= need.a * count && work.b.len >= need.b, "gemm_par's packing buffers are shorter than gemm_par_work_len says")
+    val pm = (m + V * MV - 1) / (V * MV)
+    var jc: usize = 0
+    while jc < n
+        val ncb = min(n - jc, NC)
+        val pn = (ncb + NR - 1) / NR
+        var pc: usize = 0
+        while pc < k
+            val kc = min(k - pc, KC)
+            val beta_here = if pc == 0 then beta else T.one()
+            workers.each((w) ->
+                val (p0, p1) = run_of(pn, count, w)
+                if p0 < p1
+                    pack_b[T, V, NR](b, pc, kc, jc + p0 * NR, min(ncb - p0 * NR, (p1 - p0) * NR), work.b[p0 * NR * kc..<p1 * NR * kc]))
+            val (tm, tn) = par_grid(count, pm, pn)
+            workers.each((w) ->
+                if w < tm * tn
+                    val (r0, r1) = run_of(pm, tm, w / tn)
+                    val (q0, q1) = run_of(pn, tn, w % tn)
+                    val pa = work.a[w * need.a..<(w + 1) * need.a]
+                    val i_end = min(r1 * V * MV, m)
+                    val j_end = min(q1 * NR, ncb)
+                    var tile: [TILE]T
+                    var ic = r0 * V * MV
+                    while ic < i_end
+                        val mcb = min(i_end - ic, MC)
+                        pack_a[T, V, V * MV](a, ic, mcb, pc, kc, pa)
+                        var jr = q0 * NR
+                        while jr < j_end
+                            val bp = work.b[jr * kc..<(jr + NR) * kc]
+                            var ir: usize = 0
+                            while ir < mcb
+                                micro[T, V, MV, NR](kc, pa[ir * kc..<(ir + V * MV) * kc], bp, tile[..])
+                                write_back[T, V, V * MV](c, ic + ir, jc + jr, min(mcb - ir, V * MV), min(ncb - jr, NR), tile[..], alpha, beta_here)
+                                ir += V * MV
+                            jr += NR
+                        ic += MC)
+            pc += KC
+        jc += NC
+
+/** `c := alpha * a * b + beta * c` on the caller's `workers`, packing into `work`
+ * (`gemm_par_work_len` with `workers.count()` says how much).
+ *
+ * Everything `gemm` says holds, and the result is bitwise the one `gemm` gives, for any number of
+ * workers: each element of C is summed over k in the same order. A `workers.count()` of zero traps.
+ */
+gemm_par[T: Real, W: Workers](workers: *W, alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+    assert(a.rows == c.rows && b.cols == c.cols && a.cols == b.rows, "gemm's matrices do not agree in shape")
+    assert(holds(c.data.len, c.rows, c.cols, c.row_stride, c.col_stride), "a matrix reaches past the end of its data")
+    assert(workers.count() >= 1, "gemm_par needs at least one worker")
+    if c.rows == 0 || c.cols == 0 then return
+    if alpha == T.zero() || a.cols == 0
+        scale_c(c, beta)
+        return
+    assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
+    assert(holds(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix reaches past the end of its data")
+    gemm_par_blocked[T, W, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](workers, alpha, a, b, beta, c, work)
+
 // --- trsm ------------------------------------------------------------------------------------------
 //
 // `A X = B` is solved recursively. A is split into two diagonal blocks and the block beside them; the

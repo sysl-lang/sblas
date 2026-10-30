@@ -2,7 +2,8 @@ module sh.sysl.cblas
 @tests
 
 import sh.sysl.sblas.*
-import sh.sysl.sblas.heap.{gemm_alloc, trsm_alloc}
+import sh.sysl.sblas.heap.{gemm_alloc, gemm_par_alloc, trsm_alloc}
+import sh.sysl.sblas.threads.Spawned
 import sysl.slices.as_mut_ptr
 import sysl.buf.{Buf, buf, buf_filled}
 
@@ -175,6 +176,10 @@ private val gemm_shapes: [10](usize, usize, usize) = [(0, 3, 4), (3, 0, 4), (3, 
  * zero C starts as NaN, which must not survive; the padding rows of C must come back as they went in.
  */
 private check_gemm[T: Oracle](lib: Lib, seed: u64)
+    check_gemm_on[T](lib, seed, 0)
+
+/** `check_gemm`, ours being gemm_par on `workers` threads, or gemm where that is zero. */
+private check_gemm_on[T: Oracle](lib: Lib, seed: u64, workers: usize)
     var s = Stream(seed)
     val alphas: [3]f64 = [0, 1, -1.375]
     val betas: [3]f64 = [0, 1, 0.625]
@@ -209,7 +214,10 @@ private check_gemm[T: Oracle](lib: Lib, seed: u64)
                         for i in 0..<ours.len()
                             before[i] = ours[i]
                         T.o_gemm(lib, ta, tb, i32(m), i32(n), i32(k), alpha, as_mut_ptr(av.view()), i32(lda), as_mut_ptr(bv.view()), i32(ldb), beta, as_mut_ptr(theirs.view()), i32(ldc))
-                        gemm_alloc(alpha, a, b, beta, matrix_mut(ours.view(), m, n, ldc))
+                        if workers == 0
+                            gemm_alloc(alpha, a, b, beta, matrix_mut(ours.view(), m, n, ldc))
+                        else
+                            gemm_par_alloc(&Spawned(workers), alpha, a, b, beta, matrix_mut(ours.view(), m, n, ldc))
                         for j in 0..<n
                             for i in 0..<m
                                 var bound = if beta == T.zero() then T.zero() else (beta * before[i + j * ldc]).abs()
@@ -230,6 +238,11 @@ oracle_gemm_f64()
 oracle_gemm_f32()
     for lib in libs
         check_gemm[f32](lib, 6)
+
+@test("gemm_par on three threads agrees with OpenBLAS, every transpose, alpha and beta, both widths")
+oracle_gemm_par()
+    check_gemm_on[f64](Lib.OpenBLAS, 15, 3)
+    check_gemm_on[f32](Lib.OpenBLAS, 16, 3)
 
 // --- trsm ------------------------------------------------------------------------------------------
 

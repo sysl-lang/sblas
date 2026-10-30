@@ -15,7 +15,7 @@ faer (Rust) and Octavian.jl.
 |---|---|---|
 | 1 | axpy, dot, nrm2, asum, scal, copy, swap, iamax, rot, rotg | done, f32 and f64 |
 | 2 | gemv, ger | done, f32 and f64 |
-| 3 | gemm (packing, cache blocking, threads), trsm | gemm: the blocked structure, f32 and f64, single-threaded; trsm: recursive on gemm, f32 and f64, every side, triangle and diagonal |
+| 3 | gemm (packing, cache blocking, threads), trsm | gemm: the blocked structure, f32 and f64, and `gemm_par` on the caller's workers, bitwise equal to it; trsm: recursive on gemm, f32 and f64, every side, triangle and diagonal |
 
 Complex element types, `rotm`/`rotmg`, and the banded and packed Level 2 forms are not scheduled.
 
@@ -150,6 +150,8 @@ ger(alpha, x, y, a)               // a := alpha x yᵀ + a
 val len = gemm_work_len[f64](m, n, k)              // GemmWorkLen { a, b }: elements per packing buffer
 gemm(alpha, a, b.t(), beta, c, GemmWork(pa, pb))   // c := alpha a bᵀ + beta c, in the caller's buffers
 gemm_alloc(alpha, a, b.t(), beta, c)               // sh.sysl.sblas.heap: allocates them per call
+var pool = Spawned(6)                              // sh.sysl.sblas.threads: any `impl Workers`
+gemm_par_alloc(&pool, alpha, a, b.t(), beta, c)    // the same C, bitwise, on six threads
 ```
 
 Level 2 keeps the reference's quick returns: an empty matrix leaves `y` alone whatever `beta` (so
@@ -215,8 +217,8 @@ The package needs 0.8.1 (`sysl = "0.8.1"`):
 
 ## Threading
 
-Level 3 only; Level 1 and 2 are memory-bound and run on one core. **Not built yet: blocked on F6**
-(below), which refuses the closure every worker runs. The design it is waiting with:
+Level 3 only; Level 1 and 2 are memory-bound and run on one core. `gemm_par` is built, f32 and f64,
+on sysl 0.8.3 (which lends a closure at a `@scoped` parameter a struct holding views, F6 below).
 
 **The pool is the caller's; the core never starts a thread** (decided). The core stays `@no_alloc`
 and imports nothing that requires `os`, so it states what it needs as a trait, and the caller's pool
@@ -231,13 +233,16 @@ trait Workers
 An `impl` marks its `each` `@scoped(job)` (a trait requirement may not carry it: *"'@scoped'
 promises what a body does with a parameter, and 'each' is a requirement with no body"*), which is
 what lets the job, a closure written at the call inside gemm, borrow the matrices' views rather than
-share them. `sysl.threads` has no pool, so today the caller writes one over `spawn` (a fan-out joined
-by a loop over the same array); probed on 0.8.2, with the job's closure built inside a `@no_alloc`
-module.
+share them. `sysl.threads` has no pool, so `sh.sysl.sblas.threads.Spawned(n)` is one over `spawn`:
+each `each` starts a thread per job past the first, runs the first itself, and joins the rest (a
+fan-out joined by a loop over the same slice). It is a module of its own because it requires `os`,
+which neither the core nor `heap` does; a program that runs many small products keeps a standing pool
+and implements `Workers` for it the same way.
 
 **The entry is a second routine, `gemm_par(workers, alpha, a, b, beta, c, work)`**, so `gemm` and its
-single-thread speed are untouched, and `gemm_work_len[T](m, n, k, threads)` sizes a `GemmWork` whose
-`a` holds one packed block of A per worker. `sh.sysl.sblas.heap.gemm_par_alloc` takes the workers too.
+single-thread speed are untouched, and `gemm_par_work_len[T](m, n, k, workers)` sizes a `GemmWork`
+whose `a` holds one packed block of A per worker (`gemm_work_len`'s `a` times the workers; `b` is
+shared). `sh.sysl.sblas.heap.gemm_par_alloc(workers, …)` allocates them per call.
 
 **The partition is BLIS's IC/JR.** For each KC x NC panel: one `each` packs B, each job a run of its
 NR-wide panels into the shared buffer; its return is the barrier. A second `each` computes: the
@@ -249,6 +254,10 @@ and runs the MC/JR/IR loops over its block with a tile of its own. Jobs past `tm
 **Determinism by construction**: every run starts on a multiple of MR or NR, and MC and NC are
 multiples of both, so each tile of C is the same tile, packed the same way and summed over k in the
 same order, as single-threaded gemm makes it; the result is bitwise identical for any worker count.
+The tests hold it to that: every element of C's storage, margins included, equal to gemm's on values
+whose sums round, across every blocking fringe, transposes, block views, `alpha = 0`, `beta` of zero
+(C seeded with NaN) and one, at 1, 2, 3, 5 and 64 workers on a pool that runs its jobs last first, and
+at 1, 2, 3, 6 and 7 real threads; and once against OpenBLAS on three threads.
 
 ## Oracles
 
@@ -341,29 +350,10 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   takes and drops a reference count on `work.a` and `work.b` (`ldr`/`add`/`str` + `cbz` each way)
   even with the panels passed as offsets into the whole buffers; a borrowed parameter needs neither.
   About 16 instructions per tile, under 1% at n = 64, so it is noted rather than chased.
-- **F6: a closure at a `@scoped` parameter may borrow a view, but not a struct that holds one**
-  (sysl 0.8.2; open). `reference/attributes.md § @scoped(f)` prints 12 for a closure that captures a
-  `v: []int`; move the view into a field and the same program is refused:
-
-  ```sysl
-  struct Matrix
-      data: []int
-      rows: usize
-
-  total(m: Matrix) -> int
-      Runner(0).scope((s) ->
-          s.spawn(() -> print(m.data[0] + m.data[1] + m.data[2]))
-          int(m.rows))
-  ```
-
-  *"a closure shared between two domains may be called from either, so every count it captures has
-  to be atomic — but the 'm.data' it captures reaches a '[]int', which owns its elements through a
-  count that is not atomic. … ('06')"* (`Scope`, `Runner` and the call as on the reference page). The
-  thing named is a view of shareable elements, the case the page says is lent. Threaded gemm's jobs
-  read `a` and `b` as `Matrix[T]` and write `c` as a `MatrixMut[T]`; the alternatives — a `val` per
-  field outside the closure and the view rebuilt inside it, or a `*Matrix[T]` captured — are the
-  workaround Rule 9 forbids, so the threaded routines wait for the lend to cover a struct (or a tuple)
-  whose fields are lendable views and shareable scalars.
+- **F6: a closure at a `@scoped` parameter may borrow a view, but not a struct that holds one —
+  fixed in sysl 0.8.3**, where a struct or tuple of lendable views and shareable scalars is lent as
+  its views are; `gemm_par`'s jobs capture the `Matrix[T]` `a` and `b`, the `MatrixMut[T]` `c` and
+  the `GemmWork[T]` whole, with no view rebuilt from its fields inside the closure.
 
 ## Open questions for the user
 
@@ -379,8 +369,9 @@ least 80% of its DGEMM), with Accelerate reported alongside.
    `sh.sysl.sblas.heap.gemm_alloc` and `trsm_alloc`.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads** — *decided*: the caller's pool, through the core's `Workers` trait; the core starts no
-   thread. Open: `sysl.threads` has no pool, scope or barrier, so every caller writes its own over
-   `spawn` — should the standard library supply one (with an `impl Workers` here)?
+   thread. Open: `sysl.threads` has no pool, scope or barrier, so `sh.sysl.sblas.threads.Spawned`
+   starts threads per call over `spawn` — should the standard library supply a standing pool (with an
+   `impl Workers` here)?
 8. **Vector `mul_add` and `abs`**: add them to `<N>T` before the micro-kernels are written?
 9. **The `@tests` impl rule**: allow an `impl` of a test-file trait for any type?
 10. **Tile sizes** — *decided*: fixed per target at compile time.

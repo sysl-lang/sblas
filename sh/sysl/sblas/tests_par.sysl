@@ -1,0 +1,173 @@
+module sh.sysl.sblas
+@tests
+
+import sysl.buf.{Buf, buf_filled}
+
+// gemm_par against gemm itself, element for element: the values are not exact in floating point, so
+// any change in the order a sum is taken in shows as a differing bit. Shapes cross every blocking
+// boundary and every edge gemm has, at worker counts below, at and past the number of row panels, on
+// a pool that runs its jobs one at a time, last first (`Backwards`). The same on real threads is in
+// `sh.sysl.sblas.threads`'s tests.
+
+/** Workers on the calling thread, running the jobs last first — an order a real pool may also take. */
+private struct Backwards
+    n: usize
+
+impl Workers for Backwards
+    count(*self) -> usize = self.n
+
+    @scoped(job)
+    each(*self, job: &sync Fn(usize) -> unit)
+        var w = self.n
+        while w > 0
+            w -= 1
+            job(w)
+
+/** A deterministic stream of 64-bit values, from a xorshift. */
+private struct Noise
+    state: u64
+
+impl Noise
+    next(*self) -> u64
+        self.state ^= self.state << 13
+        self.state ^= self.state >> 7
+        self.state ^= self.state << 17
+        self.state
+
+/** `n` values in (-128, 128) that are not short binary fractions, so their sums round. */
+private noisy[T: Real](n: usize, g: *Noise) -> Buf[T]
+    val b: Buf[T] = buf_filled(n, T.zero())
+    for i in 0..<n
+        b[i] = T(int(g.next() >> 44) - 524288) / T(4099)
+    b
+
+private copy_of[T: Real](b: Buf[T]) -> Buf[T]
+    val c: Buf[T] = buf_filled(b.len(), T.zero())
+    for i in 0..<b.len()
+        c[i] = b[i]
+    c
+
+/** Equal, NaN being equal to NaN: what two runs that did the same arithmetic leave. */
+private same[T: Real](x: T, y: T) -> bool = x == y || (x.is_nan() && y.is_nan())
+
+/** `rows` x `cols` of `data`, column-major with two rows and a column of margin before it and three rows
+ * after, or the transpose of such a `cols` x `rows`: a block view whose leading dimension exceeds its rows.
+ */
+private block_of[T](data: []const T, rows: usize, cols: usize, transposed: bool) -> Matrix[T]
+    val (r, c) = if transposed then (cols, rows) else (rows, cols)
+    val whole = matrix(data, r + 5, c + 1, r + 5)
+    val b = whole.block(2, 1, r, c)
+    if transposed then b.t() else b
+
+/** Room for `block_of` either way round. */
+private storage_for(rows: usize, cols: usize) -> usize = (rows + 5) * (cols + 5)
+
+/** gemm and gemm_par on equal copies of everything, then every element of C's storage compared,
+ * margins included. A beta of zero gets a C of NaN, which neither may leave.
+ */
+private check_par[T: Real, W: Workers](workers: *W, m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_t: bool, b_t: bool)
+    var g = Noise(seed * 2654435761 + 1)
+    val a = noisy[T](storage_for(m, k), &g)
+    val b = noisy[T](storage_for(k, n), &g)
+    val c = noisy[T](storage_for(m, n), &g)
+    if beta == T.zero()
+        for i in 0..<c.len()
+            c[i] = T.nan()
+    val c1 = copy_of(c)
+    val av = block_of(a.view(), m, k, a_t)
+    val bv = block_of(b.view(), k, n, b_t)
+    val cv = matrix_mut(c.view(), m + 5, n + 1, m + 5).block(2, 1, m, n)
+    val c1v = matrix_mut(c1.view(), m + 5, n + 1, m + 5).block(2, 1, m, n)
+    val len = gemm_work_len[T](m, n, k)
+    val pa: Buf[T] = buf_filled(len.a, T.zero())
+    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    gemm(alpha, av, bv, beta, cv, GemmWork(pa.view(), pb.view()))
+    val plen = gemm_par_work_len[T](m, n, k, workers.count())
+    val qa: Buf[T] = buf_filled(plen.a, T.zero())
+    val qb: Buf[T] = buf_filled(plen.b, T.zero())
+    gemm_par(workers, alpha, av, bv, beta, c1v, GemmWork(qa.view(), qb.view()))
+    for i in 0..<c.len()
+        assert(same(c[i], c1[i]), "gemm_par differs from gemm")
+    if beta == T.zero()
+        for j in 0..<n
+            for i in 0..<m
+                assert(!c1v.at(i, j).is_nan(), "gemm_par left a NaN in C with beta zero")
+
+/** The shapes: every empty dimension, one either side of MR and NR, across KC, MC and NC. */
+private par_shapes[T: Real]() -> [16](usize, usize, usize)
+    val (mr, nr, kc, mc, ncols) = gemm_blocking[T]()
+    [(0, 5, 7), (5, 0, 7), (5, 7, 0), (1, 1, 1), (mr - 1, nr + 1, 3), (mr + 1, nr - 1, 9), (2 * mr + 3, 2 * nr + 1, 17),
+        (3 * mr, 3 * nr, 5), (37, 29, kc + 3), (mc + 1, nr + 1, 5), (2 * mc + 7, 2, kc - 1), (mr + 3, ncols + 1, 3),
+        (5, 4 * nr + 3, 2 * kc + 1), (mc - 1, 3 * nr + 2, 33), (1, 13, 1), (13, 1, 2)]
+
+private sweep_par[T: Real, W: Workers](workers: *W, seed: u64)
+    var s = seed
+    for (m, n, k) in par_shapes[T]()
+        for a_t in [false, true]
+            for b_t in [false, true]
+                check_par[T, W](workers, m, n, k, T(3) / T(7), T(-5) / T(11), s, a_t, b_t)
+                s += 1
+        check_par[T, W](workers, m, n, k, T(-2) / T(3), T.zero(), s, false, true)
+        check_par[T, W](workers, m, n, k, T(5) / T(9), T.one(), s + 1, true, false)
+        check_par[T, W](workers, m, n, k, T.zero(), T(7) / T(5), s + 2, false, false)
+        check_par[T, W](workers, m, n, k, T.zero(), T.zero(), s + 3, true, true)
+        s += 4
+
+/** Worker counts: one, a few, and more than any of the shapes has row panels or tiles. */
+private val counts: [5]usize = [1, 2, 3, 5, 64]
+
+@test("gemm_par is bitwise gemm on 1, 2, 3, 5 and 64 workers taken last first, f64")
+par_backwards_f64()
+    for w in counts
+        sweep_par[f64, Backwards](&Backwards(w), u64(w) * 1000)
+
+@test("gemm_par is bitwise gemm on 1, 2, 3, 5 and 64 workers taken last first, f32")
+par_backwards_f32()
+    for w in counts
+        sweep_par[f32, Backwards](&Backwards(w), u64(w) * 1000 + 7)
+
+@test("gemm_par on more workers than tiles idles the rest, bitwise as gemm")
+par_more_workers_than_tiles()
+    val (mr, nr, _, _, _) = gemm_blocking[f64]()
+    check_par[f64, Backwards](&Backwards(7), mr + 1, nr - 1, 4, 1.0 / 3.0, 2.0 / 7.0, 5, false, false)
+    check_par[f64, Backwards](&Backwards(3), 1, 1, 9, 1.0 / 3.0, 2.0 / 7.0, 6, true, false)
+
+@test("the grid of row and column runs makes the largest block smallest, rows first")
+par_grid_choice()
+    assert(par_grid(1, 9, 9) == (1, 1))
+    assert(par_grid(4, 10, 1) == (4, 1))
+    assert(par_grid(4, 1, 10) == (1, 4))
+    assert(par_grid(9, 3, 3) == (3, 3))
+    assert(par_grid(6, 4, 4) == (4, 1))
+    assert(par_grid(6, 2, 30) == (2, 3))
+    assert(par_grid(64, 2, 3) == (2, 3))
+    assert(par_grid(3, 7, 7) == (3, 1))
+
+@test("gemm_par_work_len gives each worker a block of A and shares the panel of B")
+par_work_len()
+    val one = gemm_work_len[f64](300, 200, 400)
+    val four = gemm_par_work_len[f64](300, 200, 400, 4)
+    assert(four.a == 4 * one.a && four.b == one.b)
+    val empty = gemm_par_work_len[f32](0, 200, 400, 4)
+    assert(empty.a == 0 && empty.b == 0)
+
+@test("gemm_par traps on no workers", should_trap)
+par_no_workers()
+    val a: Buf[f64] = buf_filled(4, 1.0)
+    val c: Buf[f64] = buf_filled(4, 0.0)
+    gemm_par(&Backwards(0), 1.0, matrix(a.view(), 2, 2, 2), matrix(a.view(), 2, 2, 2), 0.0, matrix_mut(c.view(), 2, 2, 2), GemmWork(c.view(), c.view()))
+
+@test("gemm_par traps on packing buffers sized for fewer workers", should_trap)
+par_short_work()
+    val a: Buf[f64] = buf_filled(400, 1.0)
+    val c: Buf[f64] = buf_filled(400, 0.0)
+    val len = gemm_par_work_len[f64](20, 20, 20, 2)
+    val pa: Buf[f64] = buf_filled(len.a, 0.0)
+    val pb: Buf[f64] = buf_filled(len.b, 0.0)
+    gemm_par(&Backwards(3), 1.0, matrix(a.view(), 20, 20, 20), matrix(a.view(), 20, 20, 20), 0.0, matrix_mut(c.view(), 20, 20, 20), GemmWork(pa.view(), pb.view()))
+
+@test("gemm_par traps on matrices whose shapes disagree", should_trap)
+par_shape_mismatch()
+    val a: Buf[f64] = buf_filled(12, 1.0)
+    val c: Buf[f64] = buf_filled(12, 0.0)
+    gemm_par(&Backwards(2), 1.0, matrix(a.view(), 3, 4, 3), matrix(a.view(), 3, 4, 3), 0.0, matrix_mut(c.view(), 3, 4, 3), GemmWork(c.view(), c.view()))

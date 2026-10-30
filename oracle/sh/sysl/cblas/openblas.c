@@ -46,6 +46,14 @@ static void *entry(const char *name) {
 /* One lazily resolved pointer per entry point, so a call costs an indirect branch and nothing more. */
 #define RESOLVE(ty, name) static ty fn; if (fn == NULL) fn = (ty)entry(name)
 
+/* Sets how many threads OpenBLAS's own routines use from here on: the threaded comparison. */
+typedef void (*set_threads)(int);
+
+void sysl_ob_set_threads(int n) {
+    RESOLVE(set_threads, "openblas_set_num_threads");
+    fn(n);
+}
+
 typedef double (*dot_d)(int, const double *, int, const double *, int);
 typedef float (*dot_s)(int, const float *, int, const float *, int);
 typedef void (*axpy_d)(int, double, const double *, int, double *, int);

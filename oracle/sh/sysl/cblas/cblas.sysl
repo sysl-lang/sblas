@@ -69,6 +69,10 @@ extern "cblas_strsm" c_strsm(order: i32, side: i32, uplo: i32, trans: i32, diag:
 @needs(os)
 extern "sysl_ob_distinct" ob_distinct() -> int
 
+/** Sets the number of threads OpenBLAS's routines use from here on; the oracle starts it at one. */
+@needs(os)
+extern "sysl_ob_set_threads" ob_set_threads(n: i32)
+
 @needs(os)
 extern "sysl_ob_ddot" ob_ddot(n: i32, x: *f64, incx: i32, y: *f64, incy: i32) -> f64
 @needs(os)
