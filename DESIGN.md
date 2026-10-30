@@ -1,4 +1,4 @@
-# sysl-lang/blas — design
+# sysl-lang/sblas — design
 
 A BLAS written in sysl, laid out the way BLIS lays one out: everything that is the same on every
 machine is written once, generically, and each architecture contributes one small micro-kernel. The
@@ -142,7 +142,7 @@ gemv(alpha, a, x, beta, y)        // y := alpha a x + beta y;  a.t() for trans =
 ger(alpha, x, y, a)               // a := alpha x yᵀ + a
 val len = gemm_work_len[f64](m, n, k)              // GemmWorkLen { a, b }: elements per packing buffer
 gemm(alpha, a, b.t(), beta, c, GemmWork(pa, pb))   // c := alpha a bᵀ + beta c, in the caller's buffers
-gemm_alloc(alpha, a, b.t(), beta, c)               // sh.sysl.blas.heap: allocates them per call
+gemm_alloc(alpha, a, b.t(), beta, c)               // sh.sysl.sblas.heap: allocates them per call
 ```
 
 Level 2 keeps the reference's quick returns: an empty matrix leaves `y` alone whatever `beta` (so
@@ -230,7 +230,7 @@ module.
 
 **The entry is a second routine, `gemm_par(workers, alpha, a, b, beta, c, work)`**, so `gemm` and its
 single-thread speed are untouched, and `gemm_work_len[T](m, n, k, threads)` sizes a `GemmWork` whose
-`a` holds one packed block of A per worker. `sh.sysl.blas.heap.gemm_par_alloc` takes the workers too.
+`a` holds one packed block of A per worker. `sh.sysl.sblas.heap.gemm_par_alloc` takes the workers too.
 
 **The partition is BLIS's IC/JR.** For each KC x NC panel: one `each` packs B, each job a run of its
 NR-wide panels into the shared buffer; its return is the barrier. A second `each` computes: the
@@ -248,7 +248,7 @@ same order, as single-threaded gemm makes it; the result is bitwise identical fo
 - **Accelerate** (macOS): `libcblas` in the SDK resolves into vecLib, so `@link("cblas")` reaches it
   with no framework flag. The `oracle/` workspace member (`sh.sysl.cblas`) declares the CBLAS entry
   points behind a trait, `Oracle`, implemented for f32 and f64, so each check is written once for both
-  widths. It is its own project so that the `blas` package links nothing. CBLAS refuses a negative
+  widths. It is its own project so that the `sblas` package links nothing. CBLAS refuses a negative
   stride on a one-vector routine, so those checks walk the oracle forwards and mirror `iamax`'s index.
 - **OpenBLAS**: `sudo -n -u work -H /opt/homebrew/bin/brew install openblas`. It exports the same
   `cblas_*` names as Accelerate, and a Mach-O link binds each name to one library, so it is not
@@ -259,7 +259,7 @@ same order, as single-threaded gemm makes it; the result is bitwise identical fo
   matrix unit), and on Linux the only oracle.
 - **Where the two disagree, the reference decides.** Accelerate's `cblas_?gemv` with `trans` and
   `M = 0` scales `y` by `beta`; the reference and OpenBLAS return at once, as Accelerate itself does
-  for `N = 0` without `trans`. `sh.sysl.blas` follows the reference, the oracle check compares that
+  for `N = 0` without `trans`. `sh.sysl.sblas` follows the reference, the oracle check compares that
   one case with `y`'s starting value, and a test pins Accelerate's behaviour so a change in it shows.
 - **netlib**: the reference test programs (`dblat1.f`, `sblat1.f`, `dblat2.f`, `dblat3.f`) carry
   hand-derived expected values for small fixed inputs, including every stride sign; porting their
@@ -361,7 +361,7 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 ## Open questions for the user
 
 1. **The C-ABI layer**: provide `cblas_*` exports (and the Fortran `dgemm_` symbols)? In this package
-   or a separate one (`blas-cblas`)?
+   or a separate one (`sblas-cblas`)?
 2. **Negative stride on a one-vector routine** (`nrm2`, `asum`, `scal`, `iamax`): the sysl API treats
    it as a view walked backwards; the reference returns immediately (and Accelerate reports a
    parameter error). Keep the view semantics?
@@ -369,7 +369,7 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 4. **`iamax`'s result**: `Option[usize]`, 0-based (now), or CBLAS's plain index with 0 for empty?
 5. **Level 3 workspace** — *decided*: caller-supplied packing buffers in the core (`GemmWork`, sized
    by `gemm_work_len` and `trsm_work_len`; it stays `@no_alloc` and usable on a board), plus
-   `sh.sysl.blas.heap.gemm_alloc` and `trsm_alloc`.
+   `sh.sysl.sblas.heap.gemm_alloc` and `trsm_alloc`.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads** — *decided*: the caller's pool, through the core's `Workers` trait; the core starts no
    thread. Open: `sysl.threads` has no pool, scope or barrier, so every caller writes its own over

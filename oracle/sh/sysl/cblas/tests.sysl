@@ -1,12 +1,12 @@
 module sh.sysl.cblas
 @tests
 
-import sh.sysl.blas.*
-import sh.sysl.blas.heap.{gemm_alloc, trsm_alloc}
+import sh.sysl.sblas.*
+import sh.sysl.sblas.heap.{gemm_alloc, trsm_alloc}
 import sysl.slices.as_mut_ptr
 import sysl.buf.{Buf, buf, buf_filled}
 
-// Every routine of sh.sysl.blas against the platform's CBLAS on generated data, at both widths, every
+// Every routine of sh.sysl.sblas against the platform's CBLAS on generated data, at both widths, every
 // length class the kernels distinguish, and strides of each sign. The reference values come from the
 // oracle, never from this file.
 
@@ -393,7 +393,7 @@ private check_gemv[T: Oracle](lib: Lib, seed: u64)
                         gemv(alpha, a, x, beta, strided_mut(ya.view()[0..<ly], yl, incy))
                         // With nothing to sum over, the reference BLAS and OpenBLAS return at once and
                         // leave y alone; Accelerate does too, except for the transpose of a matrix with no
-                        // rows, where it scales y by beta. sh.sysl.blas follows the reference, so there y
+                        // rows, where it scales y by beta. sh.sysl.sblas follows the reference, so there y
                         // is checked against its starting value (`gemv_empty_inner` pins the divergence).
                         if !(lib == Lib.Accelerate && trans && m == 0 && n > 0)
                             T.o_gemv(lib, trans, i32(m), i32(n), alpha, as_mut_ptr(asto), i32(lda), as_mut_ptr(xs), i32(incx), beta, as_mut_ptr(yb.view()[0..<ly]), i32(incy))

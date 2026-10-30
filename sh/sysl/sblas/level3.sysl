@@ -1,4 +1,4 @@
-module sh.sysl.blas
+module sh.sysl.sblas
 @no_alloc
 
 import sysl.math.{min, max}
@@ -18,7 +18,7 @@ import sysl.vectors.{zip_lo, zip_hi}
 //
 // Everything below the routine is generic over the element type and the tile; the routine names the
 // tile per target. The packing buffers are the caller's (`GemmWork`), so nothing here allocates;
-// `sh.sysl.blas.heap.gemm_alloc` is the form that makes them.
+// `sh.sysl.sblas.heap.gemm_alloc` is the form that makes them.
 
 /** Bytes in one vector register: a NEON or SSE `q` register. */
 private const vector_bytes: usize = 16
@@ -76,7 +76,7 @@ private work_len[T, const MR: usize, const NR: usize, const KC: usize, const MC:
 /** The blocking gemm uses at this width on this target, as (MR, NR, KC, MC, NC): what a test must
  * cross to reach every fringe.
  */
-private[blas] gemm_blocking[T: Real]() -> (usize, usize, usize, usize, usize) = (vector_bytes / sizeof(T) * tile_vectors, tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc)
+private[sblas] gemm_blocking[T: Real]() -> (usize, usize, usize, usize, usize) = (vector_bytes / sizeof(T) * tile_vectors, tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc)
 
 /** The buffer sizes gemm needs for `c` (`m` x `n`) := `alpha * a * b + beta * c`, `a` being `m` x `k`. */
 gemm_work_len[T: Real](m: usize, n: usize, k: usize) -> GemmWorkLen
@@ -208,7 +208,7 @@ private const k_unroll: usize = 2
  * `for const`, so each lane, column and accumulator is fixed at compile time. The tile is written
  * column-major, MR elements to a column.
  */
-private[blas] micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usize, ap: []const T, bp: []const T, tile: []T)
+private[sblas] micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usize, ap: []const T, bp: []const T, tile: []T)
     var acc: [NR][MV]<V>T
     var a: [MV]<V>T
     @unchecked
@@ -356,7 +356,7 @@ gemm[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], wo
 /** The order of the diagonal blocks solved by substitution, a multiple of MR at both widths, so that
  * the gemm updates between them start on whole tiles.
  */
-private[blas] const trsm_leaf: usize = 16
+private[sblas] const trsm_leaf: usize = 16
 
 /** The block of `a` with `rows` x `cols` elements whose first is (`i0`, `j0`); it must not be empty. */
 private block[T](a: Matrix[T], i0: usize, j0: usize, rows: usize, cols: usize) -> Matrix[T] = Matrix(a.data[i0 * a.row_stride + j0 * a.col_stride..], rows, cols, a.row_stride, a.col_stride)

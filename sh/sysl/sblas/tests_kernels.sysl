@@ -1,4 +1,4 @@
-module sh.sysl.blas
+module sh.sysl.sblas
 @no_alloc
 @tests
 

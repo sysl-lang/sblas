@@ -1,4 +1,4 @@
-module sh.sysl.blas
+module sh.sysl.sblas
 @no_alloc
 
 import sysl.math.Float
@@ -59,7 +59,7 @@ struct StridedMut[T]
 /** Where the view's first element is in `data`, and how far apart its elements are. */
 private start(len: usize, inc: int) -> int = if inc >= 0 then 0 else (int(len) - 1) * -inc
 
-private[blas] covers(have: usize, len: usize, inc: int) -> bool = len == 0 || (int(len) - 1) * inc.abs() < int(have)
+private[sblas] covers(have: usize, len: usize, inc: int) -> bool = len == 0 || (int(len) - 1) * inc.abs() < int(have)
 
 /** Every element of `data`, contiguous. */
 view[T](data: []const T) -> Strided[T] = Strided(data, data.len, 1)
@@ -123,7 +123,7 @@ struct MatrixMut[T]
     col_stride: usize
 
 /** True when every element of a `rows` x `cols` layout is inside `have` elements of storage. */
-private[blas] holds(have: usize, rows: usize, cols: usize, rs: usize, cs: usize) -> bool = rows == 0 || cols == 0 || (rows - 1) * rs + (cols - 1) * cs < have
+private[sblas] holds(have: usize, rows: usize, cols: usize, rs: usize, cs: usize) -> bool = rows == 0 || cols == 0 || (rows - 1) * rs + (cols - 1) * cs < have
 
 private column_major(have: usize, rows: usize, cols: usize, ld: usize)
     assert(ld >= rows && ld >= 1, "the leading dimension is shorter than a column")

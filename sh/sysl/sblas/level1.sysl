@@ -1,4 +1,4 @@
-module sh.sysl.blas
+module sh.sysl.sblas
 @no_alloc
 
 // Level 1: vector-vector routines, O(n) work on O(n) data.
@@ -20,7 +20,7 @@ module sh.sysl.blas
 /** Bytes per kernel step: eight 128-bit registers, so f32 runs 32 wide and f64 16 wide. Eight
  * independent accumulators are what keep a reduction's adds from waiting on each other.
  */
-private[blas] const block_bytes: usize = 128
+private[sblas] const block_bytes: usize = 128
 
 private same_len(a: usize, b: usize)
     assert(a == b, "the two vectors have different lengths")
@@ -36,10 +36,10 @@ private span_mut[T](data: []T, len: usize) -> []T = data[0..<len]
 // --- Contiguous kernels ---------------------------------------------------------------------------
 
 /** Traps unless a kernel's second slice is as long as its first: the one check a kernel makes. */
-private[blas] runs(first: usize, other: usize)
+private[sblas] runs(first: usize, other: usize)
     assert(first == other, "a kernel's slices have different lengths")
 
-private[blas] dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) -> T
+private[sblas] dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) -> T
     runs(x.len, y.len)
     var acc: <W>T = T.zero()
     var i: usize = 0
@@ -54,7 +54,7 @@ private[blas] dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) ->
             i += 1
         s
 
-private[blas] axpy_kernel[T: Real, const W: usize](alpha: T, x: []const T, y: []T)
+private[sblas] axpy_kernel[T: Real, const W: usize](alpha: T, x: []const T, y: []T)
     runs(x.len, y.len)
     var i: usize = 0
     @unchecked
@@ -262,7 +262,7 @@ impl[T: Real] Blue[T]
 // --- Walks ----------------------------------------------------------------------------------------
 
 /** Traps unless every element of the view is inside its data: the one check a walk makes. */
-private[blas] walkable(have: usize, len: usize, inc: int)
+private[sblas] walkable(have: usize, len: usize, inc: int)
     assert(covers(have, len, inc), "a strided view reaches past the end of its data")
 
 // --- The routines ---------------------------------------------------------------------------------

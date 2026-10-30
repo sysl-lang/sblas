@@ -1,6 +1,6 @@
-package { name = "blas-bench", version = "0.0.1", sysl = "0.8.2" }
+package { name = "sblas-bench", version = "0.0.1", sysl = "0.8.2" }
 optimization = "3"
 dependencies {
-    blas { workspace = true }
+    sblas { workspace = true }
     cblas-oracle { workspace = true }
 }

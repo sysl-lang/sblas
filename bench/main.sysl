@@ -1,11 +1,11 @@
-import sh.sysl.blas.*
+import sh.sysl.sblas.*
 import sh.sysl.cblas.{Oracle, Lib, libs}
 import sysl.slices.{as_mut_ptr, sort_by}
 import sysl.time.monotonic
 import sysl.hint.black_box
 import sysl.buf.{Buf, buf}
 
-// Every contiguous Level 1 routine of sh.sysl.blas against Accelerate and OpenBLAS, at a size that
+// Every contiguous Level 1 routine of sh.sysl.sblas against Accelerate and OpenBLAS, at a size that
 // lives in L1, one in L2, and one in main memory. The three implementations are timed in turn
 // within each trial, so a change in the machine's load lands on all three alike, and the figure
 // reported is the median of the trials. Each trial is about `work` elements, so the microsecond

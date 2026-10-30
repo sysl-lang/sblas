@@ -1,6 +1,6 @@
 # bench
 
-Times every contiguous Level 1 routine of `sh.sysl.blas` against Accelerate and OpenBLAS at three
+Times every contiguous Level 1 routine of `sh.sysl.sblas` against Accelerate and OpenBLAS at three
 sizes — L1-resident (1024 elements), L2-resident (262144) and main memory (4194304) — and prints GB/s
 of vector data each call reads and writes. Within a trial the three implementations run in turn, so
 a change in the machine's load lands on all three alike; each figure is the median of seven trials

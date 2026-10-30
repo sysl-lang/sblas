@@ -1,10 +1,10 @@
 module sh.sysl.cblas
 @link("cblas")
 
-import sh.sysl.blas.Real
+import sh.sysl.sblas.Real
 
 // The Level 1 and Level 2 routines of two CBLAS implementations, declared for the checks and the benchmarks to
-// measure sh.sysl.blas against: the platform's (Accelerate on macOS, where libcblas resolves into
+// measure sh.sysl.sblas against: the platform's (Accelerate on macOS, where libcblas resolves into
 // vecLib) and OpenBLAS. A CBLAS pointer is the lowest address a vector covers, whatever the sign of
 // its stride.
 //

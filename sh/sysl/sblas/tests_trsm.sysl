@@ -1,4 +1,4 @@
-module sh.sysl.blas
+module sh.sysl.sblas
 @tests
 
 import sysl.buf.{Buf, buf_filled}

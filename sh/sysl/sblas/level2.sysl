@@ -1,4 +1,4 @@
-module sh.sysl.blas
+module sh.sysl.sblas
 @no_alloc
 
 // Level 2: matrix-vector routines, O(mn) work on O(mn) data, so memory-bound like Level 1.
