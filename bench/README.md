@@ -21,10 +21,11 @@ With `gemm` it times gemm alone instead: square sizes 64 to 2048, GFLOPS. With `
 `B := A⁻¹ B` (left, lower, non-unit, B square) at the same sizes, GFLOPS counted as n³ per call; each
 call starts from a fresh copy of B, timed alike for all three. With `l3sym` it times `syrk` (`C -= A Aᵀ`
 on the lower triangle, Cholesky's update) and `trmm` (`B := A B` with A lower on the left, `B := B A`
-with A upper on the right) the same way, n³ flops per call each. With `gemm_par` it times `gemm_par` on
-`sh.sysl.sblas.threads.Spawned` and on `sh.sysl.sblas_pool.PoolWorkers` over a standing pool, at 1,
-2, 4 and 6 workers, against OpenBLAS set to the same number of threads (`openblas_set_num_threads`),
-n = 128 to 2048. With `each` it times one `Workers.each` of empty jobs on both.
+with A upper on the right) the same way, n³ flops per call each. With `gemm_par` it times `gemm_par` on a
+`sh.sysl.sblas.threads.team` and on `sh.sysl.sblas_pool.PoolWorkers` over a standing pool, at 1, 2, 4
+and 6 workers, against OpenBLAS set to the same number of threads (`openblas_set_num_threads`),
+n = 128 to 2048. With `each` it times one `Workers.each` of empty jobs on `Spawned`, a Team and the
+pool.
 
 OpenBLAS is loaded at run time from `$SYSL_OPENBLAS`, else Homebrew's
 `/opt/homebrew/opt/openblas/lib/libopenblas.dylib`, and pinned to one thread
@@ -259,75 +260,80 @@ comparable column.
 - **syr2: 131–235% of OpenBLAS. symv: level with OpenBLAS in main memory (97–105%), behind it in L1 and
   L2 (63–102%)**, where OpenBLAS's lower-triangle kernel is fastest.
 
-## gemm_par: Apple M5 Pro (6P + 12E), sysl 0.8.3, OpenBLAS 0.3.34, 2026-10-30
+## gemm_par: Apple M5 Pro (6P + 12E), sysl 0.8.5, OpenBLAS 0.3.34, 2026-10-30
 
 `./bench gemm_par`: square column-major `C += A * B`, GFLOPS, median of seven interleaved trials of
-about 4e9 flops; sysl on `Spawned(threads)` (threads started per call) and on
-`PoolWorkers(Pool.new(threads - 1), threads)` (a standing `sysl-lang/pool` 0.1.4, the calling thread
-running the first job), OpenBLAS on the same thread count. Load average 7.8 (1 min) at the start and
-at the end.
+about 4e9 flops; sysl on `team(threads, …)` (`sh.sysl.sblas.threads`: threads started once and parked
+on a `sysl.threads.Barrier` between calls) and on `PoolWorkers(Pool.new(threads - 1), threads)` (a
+standing `sysl-lang/pool` 0.1.4), the calling thread running the first job in both, OpenBLAS on the
+same thread count. The second of two runs back to back; load average 9.4 (1 min) at the start and 9.1
+at the end, after an afternoon at 30–150, so the 5-minute average was still 35–60.
 
-| type | n | threads | Spawned | pool | OpenBLAS | Spawned % OB | pool % OB |
+| type | n | threads | Team | pool | OpenBLAS | Team % OB | pool % OB |
 |---|---|---|---:|---:|---:|---:|---:|
-| f64 | 128 | 1 | 57.5 | 56.9 | 44.6 | 129 | 127 |
-| f64 | 128 | 2 | 59.2 | 86.1 | 46.7 | 127 | 184 |
-| f64 | 128 | 4 | 49.7 | 105.3 | 50.3 | 99 | 209 |
-| f64 | 128 | 6 | 37.3 | 72.1 | 41.1 | 91 | 175 |
-| f64 | 256 | 1 | 61.6 | 61.6 | 54.7 | 113 | 113 |
-| f64 | 256 | 2 | 104.7 | 117.6 | 95.0 | 110 | 124 |
-| f64 | 256 | 4 | 125.9 | 141.6 | 131.9 | 95 | 107 |
-| f64 | 256 | 6 | 116.9 | 152.8 | 144.3 | 81 | 106 |
-| f64 | 512 | 1 | 61.9 | 60.9 | 57.3 | 108 | 106 |
-| f64 | 512 | 2 | 112.3 | 117.6 | 107.1 | 105 | 110 |
-| f64 | 512 | 4 | 167.1 | 155.9 | 185.9 | 90 | 84 |
-| f64 | 512 | 6 | 218.1 | 232.1 | 245.7 | 89 | 94 |
-| f64 | 1024 | 1 | 62.3 | 62.0 | 58.1 | 107 | 107 |
-| f64 | 1024 | 2 | 118.9 | 119.3 | 110.8 | 107 | 108 |
-| f64 | 1024 | 4 | 184.0 | 164.8 | 194.8 | 94 | 85 |
-| f64 | 1024 | 6 | 263.1 | 273.2 | 271.8 | 97 | 101 |
-| f64 | 2048 | 1 | 61.6 | 61.7 | 57.1 | 108 | 108 |
-| f64 | 2048 | 2 | 119.7 | 119.6 | 110.4 | 108 | 108 |
-| f64 | 2048 | 4 | 190.6 | 207.8 | 212.1 | 90 | 98 |
-| f64 | 2048 | 6 | 274.6 | 282.1 | 301.5 | 91 | 94 |
-| f32 | 128 | 1 | 106.5 | 109.2 | 111.4 | 96 | 98 |
-| f32 | 128 | 2 | 80.6 | 152.0 | 56.8 | 142 | 268 |
-| f32 | 128 | 4 | 49.3 | 90.4 | 58.1 | 85 | 156 |
-| f32 | 128 | 6 | 42.2 | 97.6 | 44.8 | 94 | 218 |
-| f32 | 256 | 1 | 115.6 | 114.8 | 108.1 | 107 | 106 |
-| f32 | 256 | 2 | 173.3 | 207.9 | 166.6 | 104 | 125 |
-| f32 | 256 | 4 | 158.8 | 210.7 | 224.0 | 71 | 94 |
-| f32 | 256 | 6 | 186.5 | 251.9 | 192.3 | 97 | 131 |
-| f32 | 512 | 1 | 120.6 | 121.8 | 113.7 | 106 | 107 |
-| f32 | 512 | 2 | 225.8 | 234.5 | 206.3 | 109 | 114 |
-| f32 | 512 | 4 | 337.5 | 323.8 | 355.6 | 95 | 91 |
-| f32 | 512 | 6 | 429.7 | 468.9 | 431.2 | 100 | 109 |
-| f32 | 1024 | 1 | 122.2 | 119.7 | 112.5 | 109 | 106 |
-| f32 | 1024 | 2 | 236.5 | 242.5 | 223.9 | 106 | 108 |
-| f32 | 1024 | 4 | 368.9 | 382.2 | 385.3 | 96 | 99 |
-| f32 | 1024 | 6 | 514.4 | 530.4 | 527.6 | 97 | 101 |
-| f32 | 2048 | 1 | 122.2 | 122.0 | 113.2 | 108 | 108 |
-| f32 | 2048 | 2 | 232.8 | 237.3 | 219.2 | 106 | 108 |
-| f32 | 2048 | 4 | 384.5 | 384.1 | 410.9 | 94 | 93 |
-| f32 | 2048 | 6 | 549.3 | 556.3 | 570.1 | 96 | 98 |
+| f64 | 128 | 1 | 53.3 | 54.7 | 43.7 | 122 | 125 |
+| f64 | 128 | 2 | 77.6 | 84.5 | 46.5 | 167 | 182 |
+| f64 | 128 | 4 | 63.9 | 106.6 | 49.4 | 129 | 216 |
+| f64 | 128 | 6 | 51.3 | 68.4 | 40.9 | 125 | 167 |
+| f64 | 256 | 1 | 59.3 | 60.2 | 52.8 | 112 | 114 |
+| f64 | 256 | 2 | 111.5 | 112.3 | 91.5 | 122 | 123 |
+| f64 | 256 | 4 | 142.3 | 144.8 | 135.0 | 105 | 107 |
+| f64 | 256 | 6 | 138.0 | 151.8 | 147.0 | 94 | 103 |
+| f64 | 512 | 1 | 59.5 | 60.3 | 56.7 | 105 | 106 |
+| f64 | 512 | 2 | 117.7 | 117.7 | 108.1 | 109 | 109 |
+| f64 | 512 | 4 | 221.7 | 216.5 | 199.3 | 111 | 109 |
+| f64 | 512 | 6 | 207.7 | 226.9 | 251.2 | 83 | 90 |
+| f64 | 1024 | 1 | 61.7 | 62.7 | 59.5 | 104 | 105 |
+| f64 | 1024 | 2 | 119.6 | 119.6 | 112.1 | 107 | 107 |
+| f64 | 1024 | 4 | 220.3 | 222.1 | 209.6 | 105 | 106 |
+| f64 | 1024 | 6 | 257.1 | 263.5 | 281.3 | 91 | 94 |
+| f64 | 2048 | 1 | 62.3 | 62.8 | 59.0 | 106 | 106 |
+| f64 | 2048 | 2 | 120.1 | 122.0 | 113.8 | 105 | 107 |
+| f64 | 2048 | 4 | 216.9 | 222.8 | 216.7 | 100 | 103 |
+| f64 | 2048 | 6 | 278.7 | 282.8 | 305.9 | 91 | 92 |
+| f32 | 128 | 1 | 114.5 | 113.9 | 115.0 | 100 | 99 |
+| f32 | 128 | 2 | 139.0 | 160.4 | 64.4 | 216 | 249 |
+| f32 | 128 | 4 | 131.6 | 179.7 | 67.0 | 196 | 268 |
+| f32 | 128 | 6 | 68.9 | 112.3 | 56.5 | 122 | 199 |
+| f32 | 256 | 1 | 121.4 | 122.2 | 114.5 | 106 | 107 |
+| f32 | 256 | 2 | 219.0 | 217.3 | 172.8 | 127 | 126 |
+| f32 | 256 | 4 | 338.5 | 272.2 | 244.2 | 139 | 111 |
+| f32 | 256 | 6 | 246.2 | 277.2 | 201.7 | 122 | 137 |
+| f32 | 512 | 1 | 128.0 | 127.4 | 119.2 | 107 | 107 |
+| f32 | 512 | 2 | 245.3 | 245.8 | 212.8 | 115 | 116 |
+| f32 | 512 | 4 | 364.8 | 353.3 | 383.4 | 95 | 92 |
+| f32 | 512 | 6 | 441.0 | 485.6 | 442.6 | 100 | 110 |
+| f32 | 1024 | 1 | 127.1 | 126.6 | 117.4 | 108 | 108 |
+| f32 | 1024 | 2 | 249.9 | 249.9 | 229.3 | 109 | 109 |
+| f32 | 1024 | 4 | 465.8 | 473.0 | 429.9 | 108 | 110 |
+| f32 | 1024 | 6 | 515.7 | 536.2 | 530.6 | 97 | 101 |
+| f32 | 2048 | 1 | 121.9 | 122.3 | 110.5 | 110 | 111 |
+| f32 | 2048 | 2 | 242.9 | 246.0 | 224.9 | 108 | 109 |
+| f32 | 2048 | 4 | 389.1 | 425.6 | 418.3 | 93 | 102 |
+| f32 | 2048 | 6 | 570.1 | 570.9 | 574.3 | 99 | 99 |
 
 `./bench each`: microseconds per `Workers.each` of empty jobs, median of seven runs of 20000 calls,
-load 7.1 at the start and 8.4 at the end.
+two runs (load 7.5 and 9.7 at their starts):
 
-| workers | Spawned | pool |
-|---:|---:|---:|
-| 1 | 0.04 | 0.01 |
-| 2 | 12.37 | 2.90 |
-| 4 | 24.22 | 5.28 |
-| 6 | 34.38 | 9.08 |
+| workers | Spawned | Team | pool |
+|---:|---:|---:|---:|
+| 1 | 0.02–0.03 | 0.02 | 0.01 |
+| 2 | 11.6–17.0 | 2.4–3.7 | 2.9–3.0 |
+| 4 | 24.6–43.4 | 9.9–18.7 | 4.6–5.1 |
+| 6 | 36.6–61.3 | 23.8–25.5 | 12.0–12.3 |
 
-- **The standing pool closes the small sizes**: at n = 256 and 4–6 threads 94–131% of OpenBLAS
-  where `Spawned` gives 71–97%, and at n = 128 the pool is 1.6–2.7x OpenBLAS at 2–6 threads (OpenBLAS
-  itself barely scales there). A second run straight after (load 8.3 to 10.3) gave 84–131% at
-  n = 256 and 4–6 threads for the pool, 74–91% for `Spawned`: the small sizes move by up to a fifth
-  from run to run.
-- **An `each` on the pool costs a quarter of `Spawned`'s**, 3–9 µs. An n = 256 product is one
-  KC x NC panel and two `each`, so 4% of it at four threads and 8% at six; DESIGN.md § Threading
-  has the arithmetic and why fusing them is not done.
-- **From n = 1024 the two are level**, 85–108% of OpenBLAS at 2–6 threads, and one worker runs
-  gemm's own speed on both (106–108%). f64 at four threads, which read 84–88% in the two runs above,
-  is level over three clean runs: pool 99–111% at n = 1024 and 94–104% at n = 2048, `Spawned` 90–105%.
+- **The Team does not match the pool yet, and the Barrier is why.** Its `each` is two meetings of a
+  `sysl.threads.Barrier`, which sleeps every early arrival on a condition variable and wakes them all
+  with `notify_all`. Two meetings of it cost 6.3–7.5 / 12.2–15.3 / 18.7–26.0 µs at 2 / 4 / 6 threads,
+  where two meetings of a spinning barrier on two atomics cost 0.1–0.3 / 0.5–0.6 / 0.7–0.8 µs (a probe
+  outside this repository, two runs at load 9). So the Team's `each` is the barrier's cost, and it is
+  2–4x the pool's at 4–6 workers. The finding is reported to sysl; the Team stays on the library's
+  barrier rather than carrying a barrier of its own.
+- **At n = 128 and 4–6 threads the pool is 1.2–1.8x the Team** over the two runs; at n = 256 they are
+  level at 2–4 threads and the pool 8–21% ahead at 6, and at n = 512 and 6 threads still 7–10% ahead
+  (f32 n = 256 at four threads read Team 139%, pool 111% of OpenBLAS in this run and 78 / 79% in the
+  first: the small sizes move by up to half from run to run).
+- **From n = 1024 the two are level**, Team 91–110% and pool 90–111% of OpenBLAS at 2–6 threads over
+  both runs, and one worker runs gemm's own speed on both (104–111%).
+- **Both are far cheaper than `Spawned`**: a Team's `each` is a fifth of a `Spawned` one at two
+  workers and a half to two-fifths at four to six.

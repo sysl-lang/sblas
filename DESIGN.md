@@ -159,8 +159,7 @@ ger(alpha, x, y, a)               // a := alpha x yᵀ + a
 val len = gemm_work_len[f64](m, n, k)              // GemmWorkLen { a, b }: elements per packing buffer
 gemm(alpha, a, b.t(), beta, c, GemmWork(pa, pb))   // c := alpha a bᵀ + beta c, in the caller's buffers
 gemm_alloc(alpha, a, b.t(), beta, c)               // sh.sysl.sblas.heap: allocates them per call
-var pool = Spawned(6)                              // sh.sysl.sblas.threads: any `impl Workers`
-gemm_par_alloc(&pool, alpha, a, b.t(), beta, c)    // the same C, bitwise, on six threads
+team(6, (t) -> gemm_par_alloc(t, alpha, a, b.t(), beta, c))   // the same C, bitwise, on six threads
 ```
 
 Level 2 keeps the reference's quick returns: an empty matrix leaves `y` alone whatever `beta` (so
@@ -278,10 +277,33 @@ trait Workers
 An `impl` marks its `each` `@scoped(job)` (a trait requirement may not carry it: *"'@scoped'
 promises what a body does with a parameter, and 'each' is a requirement with no body"*), which is
 what lets the job, a closure written at the call inside gemm, borrow the matrices' views rather than
-share them. `sysl.threads` has no pool, so `sh.sysl.sblas.threads.Spawned(n)` is one over `spawn`:
-each `each` starts a thread per job past the first, runs the first itself, and joins the rest (a
-fan-out joined by a loop over the same slice). It is a module of its own because it requires `os`,
-which neither the core nor `heap` does. It stays as the dependency-free example.
+share them. `sh.sysl.sblas.threads` has two over `sysl.threads` alone (sysl 0.8.5's `scope` and
+`Barrier`), a module of its own because it requires `os`, which neither the core nor `heap` does:
+
+```sysl
+team(4, (t) -> gemm_par_alloc(t, alpha, a, b, beta, c))   // threads started once for the body
+gemm_par_alloc(&Spawned(4), alpha, a, b, beta, c)         // threads started per `each`
+```
+
+**A `Team` is the dependency-free standing pool.** `team(n, body)` opens a `scope`, spawns `n - 1`
+scoped threads into it, and lends `body` a `*Team`; the compiler refuses keeping it past the body, so
+the threads cannot be outlived. Each thread loops: meet the `start` barrier, take the published job,
+run `job(w)`, meet the `done` barrier. `each` publishes the job (a `Mutex[Option[&sync Fn]]`, so the
+handoff is ordered by a lock, not by the barrier's implementation), meets `start`, runs `job(0)` on
+the calling thread, meets `done`, and clears the job, so nothing holds the borrowed closure once
+`each` returns; a worker drops its copy before it meets `done`. When the body returns, `team`
+publishes `None` and meets `start` once more, the threads leave, and `scope` joins them. Every
+`each` of every product in the body reuses the same threads (a test holds each job number to the
+same thread id across 50 calls). One `each` runs at a time, from the body's thread; a job calling
+`each` on its own team would wait for ever, and is documented, not detected. A panicking job ends the
+program wherever it runs (sysl does not unwind), so no thread is left parked: both sides are tested
+as `should_trap`.
+
+**`Spawned` stays, rebuilt on `scope`** (decided): it needs no body around the product, which suits
+a single large product where tens of microseconds per `each` do not show, and on `scope` it is five
+lines with no hand-kept `Job` array or join loop. The one behaviour change: where the system will not
+start a thread, `scope` stops the program with a message rather than running the job inline (the
+`scope` page says why — a sibling waiting at a barrier could wait for ever).
 
 **A standing pool is a workspace member, `pool-workers/`** (package `sblas-pool`, module
 `sh.sysl.sblas_pool`), so the core never depends on `sysl-lang/pool` and only a program that wants
@@ -292,13 +314,21 @@ holds the program's pool by reference — shared, not owned, so the program runs
 between products — and its `each` opens one `Pool.scope`, spawns `job(1)` … `job(n - 1)` into it and
 runs `job(0)` on the calling thread, as `Spawned` does; `on(pool)` is `pool.threads() + 1` workers.
 One `scope` of direct spawns rather than `parallel_for`, since `parallel_for` adds a level of halving
-tasks for what is a handful of jobs. Measured (`./bench each`, empty jobs, median of 7 x 20000):
+tasks for what is a handful of jobs. Measured (`./bench each`, empty jobs, median of 7 x 20000, two
+runs on sysl 0.8.5):
 
-| workers | `Spawned` | pool |
-|---:|---:|---:|
-| 2 | 12.4 µs | 2.9 µs |
-| 4 | 24.2 | 5.3 |
-| 6 | 34.4 | 9.1 |
+| workers | `Spawned` | Team | pool |
+|---:|---:|---:|---:|
+| 2 | 11.6–17.0 µs | 2.4–3.7 µs | 2.9–3.0 µs |
+| 4 | 24.6–43.4 | 9.9–18.7 | 4.6–5.1 |
+| 6 | 36.6–61.3 | 23.8–25.5 | 12.0–12.3 |
+
+**The Team matches the pool at two workers and from n = 1024, and not at 4–6 workers on small
+products**, where the pool is 1.2–1.8x at n = 128 and up to a fifth ahead at n = 256–512
+(`bench/README.md`). Its `each` is all barrier: two meetings of `sysl.threads.Barrier` cost the same
+6–26 µs on their own, against 0.1–0.8 µs for a spinning barrier (G-B below). So the pool member stays
+the recommendation for many small products, and the Team is the one that needs nothing beyond std; a
+barrier that spins before it sleeps would make the Team the default.
 
 Running job 0 on the caller matters: the first version handed every job to the pool and slept in
 `scope`, and a single worker then ran at 85–91% of `Spawned(1)` at n = 128–512 f64 (a task handoff
@@ -339,7 +369,8 @@ same order, as single-threaded gemm makes it; the result is bitwise identical fo
 The tests hold it to that: every element of C's storage, margins included, equal to gemm's on values
 whose sums round, across every blocking fringe, transposes, block views, `alpha = 0`, `beta` of zero
 (C seeded with NaN) and one, at 1, 2, 3, 5 and 64 workers on a pool that runs its jobs last first, and
-at 1, 2, 3, 6 and 7 real threads, and at 1, 2, 3 and 6 workers of a standing pool across both
+at 1, 2, 3, 6 and 7 real threads both on a Team (one per worker count, serving every shape) and on
+`Spawned`, with one Team of six across 16 products of both widths, and at 1, 2, 3 and 6 workers of a standing pool across both
 widths' fringes (`pool-workers/`); and once against OpenBLAS on three threads.
 
 ## Oracles
@@ -443,6 +474,15 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   instruction per register on AArch64). `iamax` keeps one running `maximum` of the magnitudes per chunk
   and tests the result against itself for a NaN, with no per-lane compare or sum in the loop.
 
+- **G-B: `sysl.threads.Barrier` costs microseconds per meeting, because it only sleeps** (sysl
+  0.8.5, reported). Every early arrival waits on a `Condvar` and the last wakes them all with
+  `notify_all`, so a meeting is a sleep and a wake-up per thread. Two meetings among 2 / 4 / 6 threads
+  cost 6.3–7.5 / 12.2–15.3 / 18.7–26.0 µs; the same two meetings on a spinning sense barrier (one
+  `Atomic[usize]` arrival count, one `Atomic[u64]` phase) cost 0.1–0.3 / 0.5–0.6 / 0.7–0.8 µs (two
+  runs at load 9). A barrier that spins for a few microseconds before it sleeps, as OpenMP's and
+  glibc's do, would give a `Team`'s `each` the spinning figure while keeping the sleeping one for a
+  long wait. The Team does not carry a barrier of its own around it.
+
 ## Open questions for the user
 
 1. **The C-ABI layer**: provide `cblas_*` exports (and the Fortran `dgemm_` symbols)? In this package
@@ -458,7 +498,8 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads** — *decided*: the caller's pool, through the core's `Workers` trait; the core starts no
    thread. A standing pool is `sysl-lang/pool`, behind `PoolWorkers` in the `pool-workers/` member
-   (decided); `Spawned` stays as the dependency-free example. Open: a coordinate fetches only a
+   (decided); `sh.sysl.sblas.threads` has the dependency-free `team` (threads started once per body,
+   parked on a barrier) and `Spawned` (threads per `each`), both over std alone (decided). Open: a coordinate fetches only a
    repository's root package, so a program outside this repository cannot depend on `sblas-pool` —
    give it a repository of its own (`sysl-lang/sblas-pool`), or should a coordinate be able to name a
    workspace member?

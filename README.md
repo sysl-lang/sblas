@@ -59,29 +59,38 @@ gemm(1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa[..], pb[..]))  
 `gemm_par` is the same product on the caller's workers, and gives the same C bit for bit whatever
 their number. The package starts no thread: it takes any value implementing `Workers` (`count`, and
 `each`, which runs `job(0)` … `job(count - 1)` and returns when all are done), and
-`gemm_par_work_len` sizes the buffers, a block of A per worker. Two implementations come with it:
+`gemm_par_work_len` sizes the buffers, a block of A per worker. Three implementations come with it:
 
+- **`sh.sysl.sblas.threads.team(n, body)`** needs nothing beyond sysl's standard library: it starts
+  `n - 1` threads once, lends `body` a `Team` of them and the calling thread, and every `gemm_par` in
+  the body reuses them, parked on a barrier between calls. It is level with the pool from n = 1024
+  and at two workers; at 4–6 workers on small products the pool is still up to 1.8x faster, because
+  the standard barrier sleeps rather than spins (an `each` costs 2–4 / 10–19 / 24–26 µs at 2 / 4 / 6
+  workers).
 - **`sh.sysl.sblas_pool.PoolWorkers`** (`pool-workers/`) stands on a work-stealing pool of
-  [`sysl-lang/pool`](https://github.com/sysl-lang/pool) that the program keeps: no thread is started
-  per call, an `each` costs 3–9 µs at 2–6 workers, and small products run at OpenBLAS's speed. It is
-  a workspace member of its own, so the sblas package itself still depends on nothing. A coordinate
-  fetches a repository's root package only, so another program copies its one file
-  (`pool-workers/sh/sysl/sblas_pool/pool.sysl`, 15 lines of code) for now.
-- **`sh.sysl.sblas.threads.Spawned(n)`** is the dependency-free example over `sysl.threads`: it starts
-  its threads on every call (12–34 µs per `each`), which a large product does not notice.
+  [`sysl-lang/pool`](https://github.com/sysl-lang/pool) that the program keeps: an `each` costs
+  3–12 µs at 2–6 workers, and small products run at OpenBLAS's speed or better. It is the one to use
+  for many small products, or where the program already runs a pool. It is a workspace member of its
+  own, so the sblas package itself still depends on nothing. A coordinate fetches a repository's root
+  package only, so another program copies its one file (`pool-workers/sh/sysl/sblas_pool/pool.sysl`,
+  15 lines of code) for now.
+- **`sh.sysl.sblas.threads.Spawned(n)`** starts its threads on every call (12–61 µs per `each`) and
+  needs no body around the product, which suits one large product.
 
 ```sysl
 import sh.sysl.sblas.heap.gemm_par_alloc
+import sh.sysl.sblas.threads.{Spawned, team}
 import sh.sysl.sblas_pool.on
-import sh.sysl.sblas.threads.Spawned
 import sh.sysl.pool.Pool
+
+team(6, (t) ->                            // the calling thread and five started once for the body
+    gemm_par_alloc(t, 1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2)))  // the same c, on six threads
 
 val pool = Pool.new(5)                    // kept for the program's life, and shared with its own work
 var six = on(pool)                        // the calling thread and the pool's five
-gemm_par_alloc(&six, 1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2))  // the same c, on six threads
+gemm_par_alloc(&six, 1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2))
 
-var spawned = Spawned(6)                  // sh.sysl.sblas.threads: six threads started for the call
-gemm_par_alloc(&spawned, 1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2))
+gemm_par_alloc(&Spawned(6), 1.0, a, a.t(), 0.0, matrix_mut(c[..], 2, 2, 2))  // threads started per call
 ```
 
 `trsm` solves a triangular system in place for every column of B at once — `b := alpha a⁻¹ b` on the
@@ -114,7 +123,7 @@ dependencies {
 }
 ```
 
-Needs sysl 0.8.3.
+Needs sysl 0.8.5.
 
 ## Layout
 
@@ -122,7 +131,7 @@ Needs sysl 0.8.3.
 |---|---|
 | `sh/sysl/sblas/` | the package — `sblas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range and band edges, `rotg`'s signs, `iamax`'s ties and NaNs across lanes and chunks, every length around the vector width, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary, `gemm_par` bitwise equal to it at every boundary and worker count, `trsm` solved by hand and multiplied back across them, and `syrk`, `trmm`, `symv` and `syr2` exactly equal to their definitions on integer data across the same boundaries, three layouts and every stride, with NaN or a sentinel in what they must not read or write) |
 | `sh/sysl/sblas/heap/` | `gemm_alloc`, `gemm_par_alloc`, `trsm_alloc`, `trmm_alloc`, `syrk_alloc`: the Level 3 routines with their packing buffers allocated per call (the main module is `@no_alloc`) |
-| `sh/sysl/sblas/threads/` | `Spawned(n)`: `Workers` for `gemm_par` over `sysl.threads`, a thread per job per call, and its tests on real threads (it requires `os`, which the rest does not) |
+| `sh/sysl/sblas/threads/` | `team(n, body)` and `Spawned(n)`: `Workers` for `gemm_par` over `sysl.threads` alone — threads started once per body and parked on a barrier, or a thread per job per call — and their tests on real threads: bitwise `gemm` at 1, 2, 3, 6 and 7 workers, one Team across many products, job 0 on the caller, a panicking job (it requires `os`, which the rest does not) |
 | `sh/sysl/sblas/netlib_tests.sysl` | netlib's own Level 1 test tables (`dblat1.f`, `sblat1.f`) ported: the fixed vectors and expected results at every stride in them, with netlib's `SFAC`-scaled comparison |
 | `pool-workers/` | `PoolWorkers`: `Workers` on a standing `sysl-lang/pool`, a workspace member so that only a program that wants the pool depends on it, and its tests: bitwise `gemm` at 1, 2, 3 and 6 workers across every fringe, one pool reused for hundreds of calls, more workers than blocks and than threads |
 | `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign, transpose and shape |
@@ -146,9 +155,9 @@ NEON gemm from n = 128 at f64 and 96–108% at f32. `trsm` recurses onto gemm an
 leaves in registers: 103–246% of OpenBLAS at every size. `syrk` is gemm's loops skipping the tiles
 outside its triangle (102–224% of OpenBLAS), and `trmm` recurses onto gemm as trsm does, level with
 OpenBLAS from n = 512. `gemm_par` on a standing pool runs at
-84–131% of OpenBLAS on the same thread count at n = 256 and 4–6 threads, where `Spawned` gives
-71–97% because starting threads per call is a large share of the time; from n = 1024 the two are
-level (85–108% at 2–6 threads), f64 at four threads trailing OpenBLAS by up to a sixth with either.
+79–137% of OpenBLAS on the same thread count at n = 256 and 4–6 threads, and on a Team at 78–139%;
+from n = 1024 the two are level (90–111% at 2–6 threads), six threads trailing OpenBLAS by up to a
+tenth with either.
 
 `sysl test .` runs the package, the pool member and the oracle; under ASan,
 `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`.
