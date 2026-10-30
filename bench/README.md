@@ -11,9 +11,12 @@ cd bench
 sysl build . -o bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench gemm
+caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench trsm
 ```
 
-With `gemm` it times gemm alone instead: square sizes 64 to 2048, GFLOPS.
+With `gemm` it times gemm alone instead: square sizes 64 to 2048, GFLOPS. With `trsm` it times
+`B := A⁻¹ B` (left, lower, non-unit, B square) at the same sizes, GFLOPS counted as n³ per call; each
+call starts from a fresh copy of B, timed alike for all three.
 
 OpenBLAS is loaded at run time from `$SYSL_OPENBLAS`, else Homebrew's
 `/opt/homebrew/opt/openblas/lib/libopenblas.dylib`, and pinned to one thread
