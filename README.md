@@ -36,6 +36,15 @@ gemv(1.0, a.t(), view(ys[0..<2]), 1.0, view_mut(xs[0..<3]))  // xs[0..<3] += a�
 ger(2.0, view(ys[0..<2]), view(xs[0..<3]), matrix_mut(b[..], 2, 3, 2))  // b += 2 ys xsᵀ
 ```
 
+A matrix comes apart into views of the same storage: `a.block(i, j, rows, cols)` is the block whose
+first element is `(i, j)`, and `a.col(j)` and `a.row(i)` are vectors, each trapping if it reaches past
+`a`. A blocked algorithm hands its pieces to the routines this way, as LAPACK hands `A(i, j)` and `lda`:
+
+```sysl
+gemv(1.0, a.block(0, 1, 2, 2), view(xs[0..<2]), 0.0, view_mut(ys[0..<2]))  // the right 2 x 2 of a
+print(dot(a.row(0), a.row(1)))                                            // 1·4 + 2·5 + 3·6 = 32
+```
+
 `gemm` is `c := alpha * a * b + beta * c` over the same views. Its packing buffers are the caller's,
 so the package still allocates nothing; `gemm_work_len` says how long they must be, and
 `sh.sysl.sblas.heap.gemm_alloc` is the form that allocates them per call:

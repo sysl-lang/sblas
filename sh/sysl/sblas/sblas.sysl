@@ -1,7 +1,7 @@
 module sh.sysl.sblas
 @no_alloc
 
-import sysl.math.Float
+import sysl.math.{Float, min}
 
 /** The element types the routines are written over: the two IEEE binary widths.
  *
@@ -148,6 +148,30 @@ impl[T] Matrix[T]
     /** Element `(i, j)`. */
     at(self, i: usize, j: usize) -> T = self.data[i * self.row_stride + j * self.col_stride]
 
+    /** The `rows` x `cols` block whose element `(0, 0)` is this matrix's `(i, j)`, as a view of the
+     * same storage with the same strides; traps if the block reaches past this matrix. An empty block
+     * may sit anywhere up to the far edges, `i == self.rows` or `j == self.cols`.
+     */
+    block(self, i: usize, j: usize, rows: usize, cols: usize) -> Matrix[T]
+        assert(i + rows <= self.rows && j + cols <= self.cols, "a block reaches past its matrix")
+        Matrix(self.data[offset(self.data.len, rows, cols, i * self.row_stride + j * self.col_stride)..], rows, cols, self.row_stride, self.col_stride)
+
+    /** Column `j` as a vector, element `i` being `(i, j)`; traps if there is no column `j`. */
+    col(self, j: usize) -> Strided[T]
+        assert(j < self.cols, "a column past the matrix")
+        Strided(self.data[offset(self.data.len, self.rows, 1, j * self.col_stride)..], self.rows, int(self.row_stride))
+
+    /** Row `i` as a vector, element `j` being `(i, j)`; traps if there is no row `i`. */
+    row(self, i: usize) -> Strided[T]
+        assert(i < self.rows, "a row past the matrix")
+        Strided(self.data[offset(self.data.len, 1, self.cols, i * self.row_stride)..], self.cols, int(self.col_stride))
+
+/** Where a block starting `at` elements in begins in storage of `have` elements: `at` itself, or, for an
+ * empty block, the end of the storage at most — an empty block at the far edge of a matrix may start
+ * past its last element, and it reads nothing.
+ */
+private offset(have: usize, rows: usize, cols: usize, at: usize) -> usize = if rows == 0 || cols == 0 then min(at, have) else at
+
 impl[T] MatrixMut[T]
     t(self) -> MatrixMut[T] = MatrixMut(self.data, self.cols, self.rows, self.col_stride, self.row_stride)
 
@@ -158,6 +182,21 @@ impl[T] MatrixMut[T]
 
     /** The same elements, read-only. */
     as_view(self) -> Matrix[T] = Matrix(self.data, self.rows, self.cols, self.row_stride, self.col_stride)
+
+    /** The writable form of `Matrix.block`, with the same checks. */
+    block(self, i: usize, j: usize, rows: usize, cols: usize) -> MatrixMut[T]
+        assert(i + rows <= self.rows && j + cols <= self.cols, "a block reaches past its matrix")
+        MatrixMut(self.data[offset(self.data.len, rows, cols, i * self.row_stride + j * self.col_stride)..], rows, cols, self.row_stride, self.col_stride)
+
+    /** The writable form of `Matrix.col`. */
+    col(self, j: usize) -> StridedMut[T]
+        assert(j < self.cols, "a column past the matrix")
+        StridedMut(self.data[offset(self.data.len, self.rows, 1, j * self.col_stride)..], self.rows, int(self.row_stride))
+
+    /** The writable form of `Matrix.row`. */
+    row(self, i: usize) -> StridedMut[T]
+        assert(i < self.rows, "a row past the matrix")
+        StridedMut(self.data[offset(self.data.len, 1, self.cols, i * self.row_stride)..], self.cols, int(self.col_stride))
 
 /** Which triangle of a square matrix a routine reads: `Upper` is the elements with `i <= j`, `Lower`
  * those with `i >= j`, and the other triangle is never touched. It describes the view as passed, so the

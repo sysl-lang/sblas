@@ -137,6 +137,13 @@ ld)` is BLAS's column-major layout and traps when `ld < max(1, rows)` or the dat
 hand-built view is checked by the routine before it reads. `gemm` therefore needs no
 `transa`/`transb`/`lda` parameters; packing absorbs whatever strides it is given.
 
+**A view comes apart into views.** `a.block(i, j, rows, cols)`, `a.col(j)` and `a.row(i)` (on both
+`Matrix` and `MatrixMut`) are views of the same storage with the parent's strides, so a blocked
+algorithm — slapack's `getrf` is the first — passes its panels and trailing blocks to `trsm` and
+`gemm`, and its columns and rows to `iamax`, `scal`, `swap` and `ger`, with no copy. Each traps if it
+reaches past the parent; an empty block may sit at the far edges (`i == rows`, `j == cols`), where it
+starts at the end of the storage and reads nothing.
+
 ```sysl
 gemv(alpha, a, x, beta, y)        // y := alpha a x + beta y;  a.t() for trans = 'T'
 ger(alpha, x, y, a)               // a := alpha x yᵀ + a

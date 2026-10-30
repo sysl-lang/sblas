@@ -1,0 +1,177 @@
+module sh.sysl.sblas
+@tests
+
+// The matrix views a caller takes apart: a block, a column and a row of a Matrix or a MatrixMut, each a
+// view of the same storage. Every element of the 3 x 4 fixture below is its own column-major index, so
+// a value read is the place it was read from.
+
+/** A 3 x 4 column-major matrix in a 5-row leading dimension: element (i, j) holds `i + 5 j`, and the
+ * two padding rows of each column hold -1.
+ */
+private fixture() -> [20]f64
+    var s: [20]f64
+    for j in 0..<4
+        for i in 0..<5
+            s[i + 5 * j] = if i < 3 then f64(i + 5 * j) else -1
+    s
+
+@test("a block reads the parent's elements at its offset, with the parent's strides")
+views_block_reads()
+    val s = fixture()
+    val a = matrix(s[..], 3, 4, 5)
+    val b = a.block(1, 2, 2, 2)
+    assert(b.rows == 2 && b.cols == 2 && b.row_stride == 1 && b.col_stride == 5)
+    for j in 0..<2
+        for i in 0..<2
+            assert(b.at(i, j) == a.at(i + 1, j + 2))
+    // A block of a block is the block at the summed offset.
+    val bb = a.block(0, 1, 3, 3).block(1, 1, 2, 2)
+    for j in 0..<2
+        for i in 0..<2
+            assert(bb.at(i, j) == a.at(i + 1, j + 2))
+    // The whole matrix as a block is the matrix.
+    val whole = a.block(0, 0, 3, 4)
+    for j in 0..<4
+        for i in 0..<3
+            assert(whole.at(i, j) == a.at(i, j))
+
+@test("a block of a transpose is the transpose of the mirrored block")
+views_block_transpose()
+    val s = fixture()
+    val a = matrix(s[..], 3, 4, 5)
+    val bt = a.t().block(2, 1, 2, 2)
+    val b = a.block(1, 2, 2, 2)
+    for j in 0..<2
+        for i in 0..<2
+            assert(bt.at(i, j) == b.at(j, i))
+
+@test("a writable block writes the parent's storage, and nothing outside the block")
+views_block_writes()
+    var s = fixture()
+    val a = matrix_mut(s[..], 3, 4, 5)
+    val b = a.block(1, 1, 2, 3)
+    for j in 0..<3
+        for i in 0..<2
+            b.set(i, j, 100)
+    for j in 0..<4
+        for i in 0..<5
+            val inside = i >= 1 && i < 3 && j >= 1
+            assert(s[i + 5 * j] == (if inside then 100 else if i < 3 then f64(i + 5 * j) else -1))
+    // as_view of a writable block reads what was written.
+    assert(b.as_view().at(1, 2) == 100)
+
+@test("a column and a row read the matrix's elements in order, with the matrix's strides")
+views_col_row()
+    val s = fixture()
+    val a = matrix(s[..], 3, 4, 5)
+    for j in 0..<4
+        val c = a.col(j)
+        assert(c.len == 3 && c.inc == 1)
+        for i in 0..<3
+            assert(c.at(i) == a.at(i, j))
+    for i in 0..<3
+        val r = a.row(i)
+        assert(r.len == 4 && r.inc == 5)
+        for j in 0..<4
+            assert(r.at(j) == a.at(i, j))
+    // A column of the transpose is a row of the matrix.
+    val tc = a.t().col(2)
+    assert(tc.len == 4 && tc.inc == 5)
+    for j in 0..<4
+        assert(tc.at(j) == a.at(2, j))
+    // A column of a block starts at the block's offset.
+    val bc = a.block(1, 1, 2, 2).col(1)
+    assert(bc.len == 2 && bc.at(0) == a.at(1, 2) && bc.at(1) == a.at(2, 2))
+
+@test("a writable column and row write the matrix's storage")
+views_col_row_write()
+    var s = fixture()
+    val a = matrix_mut(s[..], 3, 4, 5)
+    val c = a.col(3)
+    for i in 0..<3
+        c.set(i, 50)
+    val r = a.row(0)
+    for j in 0..<4
+        r.set(j, 60)
+    for j in 0..<4
+        for i in 0..<3
+            assert(s[i + 5 * j] == (if i == 0 then 60 else if j == 3 then 50 else f64(i + 5 * j)))
+    assert(s[3] == -1 && s[18] == -1, "a column wrote its padding")
+
+@test("the views reach the routines: gemv on a block, axpy into a column, dot of a row and a column")
+views_with_routines()
+    var s = fixture()
+    val a = matrix_mut(s[..], 3, 4, 5)
+    // y = block(1, 1, 2, 2) [1, 1] = [6 + 11, 7 + 12].
+    val x: [2]f64 = [1, 1]
+    var y: [2]f64
+    gemv(1.0, a.as_view().block(1, 1, 2, 2), view(x[..]), 0.0, view_mut(y[..]))
+    assert(y[0] == 17 && y[1] == 19)
+    // Column 0 += 2 row 0's first three elements: [0, 1, 2] + 2 [0, 5, 10].
+    axpy(2.0, a.as_view().block(0, 0, 1, 3).row(0), a.col(0))
+    assert(s[0] == 0 && s[1] == 11 && s[2] == 22)
+    val ones: [4]f64 = [1, 1, 1, 1]
+    assert(dot(a.as_view().row(2), view(ones[..])) == 22 + 7 + 12 + 17)
+
+@test("an empty block may sit at the far edges, and an empty matrix's blocks, columns and rows are empty")
+views_empty()
+    val s = fixture()
+    val a = matrix(s[..], 3, 4, 5)
+    val corner = a.block(3, 4, 0, 0)
+    assert(corner.rows == 0 && corner.cols == 0)
+    val bottom = a.block(3, 0, 0, 4)
+    assert(bottom.rows == 0 && bottom.cols == 4)
+    val right = a.block(0, 4, 3, 0)
+    assert(right.rows == 3 && right.cols == 0)
+    // gemv over an empty block leaves y alone, as for any empty matrix.
+    var y: [3]f64 = [7, 7, 7]
+    var none: [1]f64
+    gemv(1.0, right, view(none[0..<0]), 0.0, view_mut(y[..]))
+    assert(y[0] == 7 && y[2] == 7)
+    // A matrix with no rows has empty columns; one with no columns has empty rows.
+    var e: [1]f64
+    val no_rows = matrix(e[0..<0], 0, 3, 1)
+    assert(no_rows.col(2).len == 0)
+    val no_cols = matrix_mut(e[0..<0], 2, 0, 2)
+    assert(no_cols.row(1).len == 0)
+    assert(matrix(e[0..<0], 0, 0, 1).block(0, 0, 0, 0).rows == 0)
+
+@test("a block past the matrix's rows traps", should_trap)
+views_block_past_rows()
+    val s = fixture()
+    _ = matrix(s[..], 3, 4, 5).block(2, 0, 2, 1)
+
+@test("a block past the matrix's columns traps", should_trap)
+views_block_past_cols()
+    val s = fixture()
+    _ = matrix(s[..], 3, 4, 5).block(0, 3, 1, 2)
+
+@test("an empty block starting past the matrix traps", should_trap)
+views_block_empty_past()
+    val s = fixture()
+    _ = matrix(s[..], 3, 4, 5).block(4, 0, 0, 0)
+
+@test("a writable block past the matrix traps", should_trap)
+views_block_mut_past()
+    var s = fixture()
+    _ = matrix_mut(s[..], 3, 4, 5).block(0, 0, 4, 1)
+
+@test("a column past the matrix traps", should_trap)
+views_col_past()
+    val s = fixture()
+    _ = matrix(s[..], 3, 4, 5).col(4)
+
+@test("a row past the matrix traps", should_trap)
+views_row_past()
+    val s = fixture()
+    _ = matrix(s[..], 3, 4, 5).row(3)
+
+@test("a writable column past the matrix traps", should_trap)
+views_col_mut_past()
+    var s = fixture()
+    _ = matrix_mut(s[..], 3, 4, 5).col(4)
+
+@test("a writable row past the matrix traps", should_trap)
+views_row_mut_past()
+    var s = fixture()
+    _ = matrix_mut(s[..], 3, 4, 5).row(3)
