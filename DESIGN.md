@@ -387,4 +387,9 @@ least 80% of its DGEMM), with Accelerate reported alongside.
     `syrk`, `trsv`) to show whether that is worth a type per triangle.
 14. **`iamax` and NaN** — *decided*: the first NaN wins over everything, infinities included; with no
     NaN, the first element of largest magnitude (reference LAPACK 3.10's `i?amax`). Accelerate and
-    OpenBLAS differ (see Oracles).
+    OpenBLAS differ (see Oracles). **Cost**: the kernel is bound by vector ALU throughput (abs,
+    compare, select per register), so the one extra operation per vector that detects a NaN (a lane
+    sum, NaN-valued where a NaN was added) costs about a third: f64 `iamax` 85 -> 54 GB/s, f32
+    90 -> 54, measured at load 6-8 against the previous kernel. Per-vector `any()`, a mask OR, a
+    NaN-poisoning select and a separate scan pass were all slower. The way back to the old speed is a
+    lane-wise NaN-aware maximum (`llvm.maximum` on a vector, which `extern` refuses today).
