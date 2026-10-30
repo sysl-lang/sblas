@@ -178,7 +178,7 @@ non-positive stride on a one-vector routine is a quick return there, a view here
 
 ## Where sysl 0.8.0 matters
 
-The package needs 0.8.0 (`sysl = "0.8.0"`):
+The package needs 0.8.1 (`sysl = "0.8.1"`):
 
 - **Unchecked access in the walks.** A strided walk checks once, before it starts, that the view's
   last element is inside its data (`walkable`), then reads and writes inside an `@unchecked` block.
@@ -255,6 +255,10 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 
 ## Gaps found so far
 
+- **F1 is fixed in sysl 0.8.1 for Level 3.** `@unchecked` reaches a vector `load` and `store`, so
+  gemm's micro-kernel inner loop is 59 instructions per two steps at both widths (48 `fmla` by
+  element, 6 `ldp q`, the counter and the branch) with no check in it or in the tile's store, and B's
+  packing, the write-back and trsm's leaf move vectors unchecked.
 - **F1: a vector load or store cannot be unchecked.** `@unchecked` covers subscripts, and `x.load(i)`
   / `y.store(i, v)` are methods, so inside the block they still compare `i` against `len - W` and
   branch to `sysl_bounds_fail` (checked in the emitted IR of a three-line probe: `x[i]` loses its
@@ -276,7 +280,9 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   reduction cannot be vectorized by the back end, since it may not reassociate a float sum.
 - **Vector `mul_add`** (sysl 0.8.1). `a * b + c` already contracts to `fmla` at `optimization = "2"`
   (`dot`, `axpy`, `rot` all use `fmla.2d`/`fmla.4s`), so Level 1 is not slowed; it is for the
-  micro-kernel, which must be able to ask for the fused form rather than hope for it.
+  micro-kernel, which must be able to ask for the fused form rather than hope for it. gemm's
+  micro-kernel and trsm's leaf now ask for it (`a.mul_add(b[l], acc)`); the instructions are the same
+  `fmla` by element as before, now promised rather than contracted.
 - **An `impl` in a `@tests` file is refused for a builtin type even when the trait is the file's
   own.** The stated reason — a trait answering differently in tests and in the shipped program — does
   not arise for a trait that exists only in tests. This is why the oracle trait lives in the `oracle/`
@@ -288,10 +294,10 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   missing is a vector-to-array conversion (`val arr: [N]f64 = v` is refused in sysl 0.8.0, *declared
   […]f64 but the value is <N>f64*); sysl 0.8.1 makes it implicit at an assignment, an argument and a
   return, where the element type and the length agree.
-- **F4: no prefetch.** Nothing in `docs/content/reference/` or the library names one (`sysl.hint` has
-  only `black_box`; `import sysl.mem.prefetch` → *no module is called 'sysl.mem.prefetch'*).
-  OpenBLAS's dgemm kernel issues `prfm PLDL1KEEP` ahead in both panels; gemm has none. Wanted:
-  `sysl.hint.prefetch(slice, index)` lowering to `llvm.prefetch`.
+- **F4: prefetch is available from sysl 0.8.1** (`sysl.hint.prefetch(p, access, locality)`, one
+  `prfm`). gemm does not use it: prefetching both panels ahead in the k loop (A 512 or 1024 bytes, B
+  384 or 768) and the C tile before its write-back measured no faster at any size on an M5 Pro, whose
+  hardware prefetcher already follows the unit-stride panel walks.
 - **A slice argument is retained and released around an inlined call.** Each tile's `micro` call
   takes and drops a reference count on `work.a` and `work.b` (`ldr`/`add`/`str` + `cbz` each way)
   even with the panels passed as offsets into the whole buffers; a borrowed parameter needs neither.

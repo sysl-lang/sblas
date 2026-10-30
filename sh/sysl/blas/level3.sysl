@@ -2,7 +2,7 @@ module sh.sysl.blas
 @no_alloc
 
 import sysl.math.{min, max}
-
+import sysl.vectors.{zip_lo, zip_hi}
 // Level 3: gemm, laid out as BLIS lays it out, and trsm on top of it (at the end of the file).
 //
 // Five loops partition the work. The outermost walks C in column blocks NC wide; inside it the shared
@@ -118,8 +118,16 @@ private pack_a[T: Real, const V: usize, const MR: usize](a: Matrix[T], i0: usize
 /** Packs rows `p0 ..< p0 + kc` and columns `j0 ..< j0 + nc` of `b` into NR-column panels: panel `r`
  * starts at `r * NR * kc`, and holds row `p` of its columns at `p * NR`. A fringe panel's missing
  * columns are zeros.
+ *
+ * A whole panel is moved `V` lanes at a time where `b` allows it. A row-major `b` holds each row's NR
+ * elements side by side, so a row is copied as vectors. A column-major `b` holds V rows of each
+ * column side by side: the NR columns are loaded as vectors, turned into V rows in registers
+ * (`transpose`), and stored a row at a time. Where NR is not a multiple of V the last V columns are
+ * turned and stored over the row's end, rewriting the columns they share with the group before them
+ * with the same values, as the micro-kernel reads them. What is left — a fringe panel, rows past the
+ * last whole V, any other strides — is copied an element at a time.
  */
-private pack_b[T: Real, const NR: usize](b: Matrix[T], p0: usize, kc: usize, j0: usize, nc: usize, out: []T)
+private pack_b[T: Real, const V: usize, const NR: usize](b: Matrix[T], p0: usize, kc: usize, j0: usize, nc: usize, out: []T)
     assert(round_up(nc, NR) * kc <= out.len, "gemm's B packing buffer is too short for the block")
     val rs = b.row_stride
     val cs = b.col_stride
@@ -129,20 +137,66 @@ private pack_b[T: Real, const NR: usize](b: Matrix[T], p0: usize, kc: usize, j0:
         while jr < nc
             val nr = min(nc - jr, NR)
             val base = p0 * rs + (j0 + jr) * cs
-            for p in 0..<kc
+            var p: usize = 0
+            if nr == NR && cs == 1
+                while p < kc
+                    val row = base + p * rs
+                    for const jv in 0..<NR / V
+                        val x: <V>T = b.data.load(row + jv * V)
+                        out.store(at + jv * V, x)
+                    if const NR % V != 0
+                        val x: <V>T = b.data.load(row + NR - V)
+                        out.store(at + NR - V, x)
+                    at += NR
+                    p += 1
+            else if nr == NR && rs == 1
+                while p + V <= kc
+                    val col = base + p
+                    for const g in 0..<NR / V
+                        var cols: [V]<V>T
+                        for const l in 0..<V
+                            cols[l] = b.data.load(col + (g * V + l) * cs)
+                        val rows = transpose[T, V](cols)
+                        for const l in 0..<V
+                            out.store(at + l * NR + g * V, rows[l])
+                    if const NR % V != 0
+                        var cols: [V]<V>T
+                        for const l in 0..<V
+                            cols[l] = b.data.load(col + (NR - V + l) * cs)
+                        val rows = transpose[T, V](cols)
+                        for const l in 0..<V
+                            out.store(at + l * NR + NR - V, rows[l])
+                    at += V * NR
+                    p += V
+            while p < kc
                 val row = base + p * rs
                 for j in 0..<nr
                     out[at + j] = b.data[row + j * cs]
                 for j in nr..<NR
                     out[at + j] = T.zero()
                 at += NR
+                p += 1
             jr += NR
+
+/** The V x V block whose columns are `cols`, as its rows: lane `j` of row `l` is lane `l` of column
+ * `j`. Each of log₂ V rounds interleaves vector `i` with vector `i + V/2` (`zip1` and `zip2` on
+ * AArch64), and after the last round the rows are in order. V is a power of two.
+ */
+private transpose[T: Real, const V: usize](cols: [V]<V>T) -> [V]<V>T
+    var m = cols
+    for const s in 0..<V
+        if const (usize(1) << s) < V
+            val n = m
+            for const i in 0..<V / 2
+                m[2 * i] = n[i].shuffle(n[i + V / 2], zip_lo[V]())
+                m[2 * i + 1] = n[i].shuffle(n[i + V / 2], zip_hi[V]())
+    m
 
 // --- The micro-kernel ------------------------------------------------------------------------------
 
 /** How many rank-1 updates the micro-kernel's loop does per trip; the rest of `kc` runs one at a time.
- * Two takes the loop's own count, add and branch off every other step (10% faster on an M5); three or
- * four run out of registers, since LLVM then loads every step's A column ahead, and spill.
+ * Two takes the loop's own count, add and branch off every other step (10% faster on an M5). Four no
+ * longer spills (28.5 instructions a step against two's 29.5), but measures no faster.
  */
 private const k_unroll: usize = 2
 
@@ -169,12 +223,12 @@ private[blas] micro[T: Real, const V: usize, const MV: usize, const NR: usize](k
                     val b: <V>T = bp.load(bo + jv * V)
                     for const l in 0..<V
                         for const v in 0..<MV
-                            acc[jv * V + l][v] = a[v] * b[l] + acc[jv * V + l][v]
+                            acc[jv * V + l][v] = a[v].mul_add(b[l], acc[jv * V + l][v])
                 if const NR % V != 0
                     val b: <V>T = bp.load(bo + NR - V)
                     for const l in V - NR % V..<V
                         for const v in 0..<MV
-                            acc[NR - V + l][v] = a[v] * b[l] + acc[NR - V + l][v]
+                            acc[NR - V + l][v] = a[v].mul_add(b[l], acc[NR - V + l][v])
         for p in kc / k_unroll * k_unroll..<kc
             val ao = p * V * MV
             for const v in 0..<MV
@@ -184,23 +238,35 @@ private[blas] micro[T: Real, const V: usize, const MV: usize, const NR: usize](k
                 val b: <V>T = bp.load(bo + jv * V)
                 for const l in 0..<V
                     for const v in 0..<MV
-                        acc[jv * V + l][v] = a[v] * b[l] + acc[jv * V + l][v]
+                        acc[jv * V + l][v] = a[v].mul_add(b[l], acc[jv * V + l][v])
             if const NR % V != 0
                 val b: <V>T = bp.load(bo + NR - V)
                 for const l in V - NR % V..<V
                     for const v in 0..<MV
-                        acc[NR - V + l][v] = a[v] * b[l] + acc[NR - V + l][v]
-    for const j in 0..<NR
-        for const v in 0..<MV
-            tile.store((j * MV + v) * V, acc[j][v])
+                        acc[NR - V + l][v] = a[v].mul_add(b[l], acc[NR - V + l][v])
+        for const j in 0..<NR
+            for const v in 0..<MV
+                tile.store((j * MV + v) * V, acc[j][v])
 
 /** Adds the `mr` x `nr` corner of `tile` into C at (`i0`, `j0`): `c := alpha * tile + beta * c`, where
- * a `beta` of zero writes without reading C, so a NaN there does not survive.
+ * a `beta` of zero writes without reading C, so a NaN there does not survive. A whole column of the
+ * tile into a column-major C moves as `MR / V` vectors; anything else an element at a time.
  */
-private write_back[T: Real, const MR: usize](c: MatrixMut[T], i0: usize, j0: usize, mr: usize, nr: usize, tile: []const T, alpha: T, beta: T)
+private write_back[T: Real, const V: usize, const MR: usize](c: MatrixMut[T], i0: usize, j0: usize, mr: usize, nr: usize, tile: []const T, alpha: T, beta: T)
     val rs = c.row_stride
     val cs = c.col_stride
     @unchecked
+        if mr == MR && rs == 1
+            for j in 0..<nr
+                val col = i0 + (j0 + j) * cs
+                for const v in 0..<MR / V
+                    val t: <V>T = tile.load(j * MR + v * V)
+                    if beta == T.zero()
+                        c.data.store(col + v * V, t * alpha)
+                    else
+                        val old: <V>T = c.data.load(col + v * V)
+                        c.data.store(col + v * V, t * alpha + old * beta)
+            return
         for j in 0..<nr
             val col = i0 * rs + (j0 + j) * cs
             if beta == T.zero()
@@ -239,7 +305,7 @@ private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, 
         while pc < k
             val kc = min(k - pc, KC)
             val beta_here = if pc == 0 then beta else T.one()
-            pack_b[T, NR](b, pc, kc, jc, ncb, work.b)
+            pack_b[T, V, NR](b, pc, kc, jc, ncb, work.b)
             var ic: usize = 0
             while ic < m
                 val mcb = min(m - ic, MC)
@@ -250,7 +316,7 @@ private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, 
                     var ir: usize = 0
                     while ir < mcb
                         micro[T, V, MV, NR](kc, work.a[ir * kc..<(ir + V * MV) * kc], bp, tile[..])
-                        write_back[T, V * MV](c, ic + ir, jc + jr, min(mcb - ir, V * MV), min(ncb - jr, NR), tile[..], alpha, beta_here)
+                        write_back[T, V, V * MV](c, ic + ir, jc + jr, min(mcb - ir, V * MV), min(ncb - jr, NR), tile[..], alpha, beta_here)
                         ir += V * MV
                     jr += NR
                 ic += MC
@@ -299,10 +365,17 @@ private block[T](a: Matrix[T], i0: usize, j0: usize, rows: usize, cols: usize) -
 private block_mut[T](b: MatrixMut[T], i0: usize, j0: usize, rows: usize, cols: usize) -> MatrixMut[T] = MatrixMut(b.data[i0 * b.row_stride + j0 * b.col_stride..], rows, cols, b.row_stride, b.col_stride)
 
 /** Solves `a x = b` in place by substitution, `a` being a triangle of at most `trsm_leaf` rows. Each
- * solved row is subtracted from the rows that still depend on it; the inner loop runs down b's
- * columns when its rows are adjacent and along its rows when its columns are.
+ * solved row is subtracted from the rows that still depend on it. A b whose rows are adjacent is solved
+ * a column at a time in registers (`solve_leaf_columns`); otherwise the inner loop runs down b's
+ * columns or along its rows, whichever are closer together, and along adjacent columns by vectors.
  */
 private solve_leaf[T: Real](lower: bool, unit: bool, a: Matrix[T], b: MatrixMut[T])
+    if b.row_stride == 1
+        if lower
+            solve_leaf_columns[T, vector_bytes / sizeof(T), trsm_leaf * sizeof(T) / vector_bytes, true](unit, a, b)
+        else
+            solve_leaf_columns[T, vector_bytes / sizeof(T), trsm_leaf * sizeof(T) / vector_bytes, false](unit, a, b)
+        return
     val m = b.rows
     val n = b.cols
     var inv: [trsm_leaf]T
@@ -335,8 +408,80 @@ private solve_leaf[T: Real](lower: bool, unit: bool, a: Matrix[T], b: MatrixMut[
                 for p in lo..<hi
                     val f = a.data[p * ars + i * acs]
                     val dst = p * rs
-                    for j in 0..<n
+                    var j: usize = 0
+                    if cs == 1
+                        val v = vector_bytes / sizeof(T)
+                        while j + v <= n
+                            subtract_scaled[T, vector_bytes / sizeof(T)](b.data, dst + j, row + j, f)
+                            j += v
+                    while j < n
                         b.data[dst + j * cs] = b.data[dst + j * cs] - f * b.data[row + j * cs]
+                        j += 1
+
+/** `b[dst ..< dst + V] -= f * b[src ..< src + V]`, as one vector of V lanes. */
+private subtract_scaled[T: Real, const V: usize](b: []T, dst: usize, src: usize, f: T)
+    @unchecked
+        val d: <V>T = b.load(dst)
+        val s: <V>T = b.load(src)
+        b.store(dst, s.mul_add(-f, d))
+
+/** The leaf solve for a b whose rows are adjacent, a column at a time in registers.
+ *
+ * The triangle is first packed into `neg`: column `i` holds `-a[p, i]` for every row `p` that row `i` is
+ * subtracted from — below it for a `LOWER` triangle, above it otherwise — and zeros elsewhere, so that
+ * the other triangle and the diagonal are never read, and with them the rows past `m` of a leaf
+ * shorter than `trsm_leaf`. Then each column of b is held as `trsm_leaf / V` vectors (a short one
+ * through a zero-padded copy) and solved in order: row `i` is scaled by its diagonal's reciprocal, and
+ * each whole vector of rows still to come takes `neg`'s column `i` times it in one fused multiply-add.
+ * The rows still to come in row `i`'s own vector are updated one lane at a time, so a row already
+ * solved is never touched: an infinity from a zero on the diagonal reaches exactly the rows the
+ * reference substitution sends it to. A padding row has a reciprocal of zero and stays zero.
+ */
+private solve_leaf_columns[T: Real, const V: usize, const W: usize, const LOWER: bool](unit: bool, a: Matrix[T], b: MatrixMut[T])
+    val m = b.rows
+    var neg: [trsm_leaf * trsm_leaf]T
+    var inv: [trsm_leaf]T
+    for i in 0..<m
+        inv[i] = if unit then T.one() else T.one() / a.at(i, i)
+        val (lo, hi) = if LOWER then (i + 1, m) else (0, i)
+        for p in lo..<hi
+            neg[i * trsm_leaf + p] = -a.at(p, i)
+    val cs = b.col_stride
+    @unchecked
+        for j in 0..<b.cols
+            val col = j * cs
+            var x: [W]<V>T
+            if m == trsm_leaf
+                for const w in 0..<W
+                    x[w] = b.data.load(col + w * V)
+            else
+                var t: [trsm_leaf]T
+                for i in 0..<m
+                    t[i] = b.data[col + i]
+                for const w in 0..<W
+                    x[w] = t.load(w * V)
+            for const s in 0..<trsm_leaf
+                const i = if LOWER then s else trsm_leaf - 1 - s
+                const lane = i % V
+                const at = i / V
+                val xi = x[at][lane] * inv[i]
+                x[at][lane] = xi
+                for const l in 0..<V
+                    if const (LOWER && l > lane) || (!LOWER && l < lane)
+                        x[at][l] = x[at][l] + neg[i * trsm_leaf + at * V + l] * xi
+                for const w in 0..<W
+                    if const (LOWER && w > at) || (!LOWER && w < at)
+                        val c: <V>T = neg.load(i * trsm_leaf + w * V)
+                        x[w] = c.mul_add(xi, x[w])
+            if m == trsm_leaf
+                for const w in 0..<W
+                    b.data.store(col + w * V, x[w])
+            else
+                var t: [trsm_leaf]T
+                for const w in 0..<W
+                    t.store(w * V, x[w])
+                for i in 0..<m
+                    b.data[col + i] = t[i]
 
 /** `b := a⁻¹ b` for a triangular `a` of b's rows, recursively as the section's comment describes. */
 private trsm_left[T: Real](lower: bool, unit: bool, a: Matrix[T], b: MatrixMut[T], work: GemmWork[T])

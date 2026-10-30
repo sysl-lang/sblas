@@ -115,6 +115,65 @@ trsm_sizes_f64()
 trsm_sizes_f32()
     sweep_trsm[f32](32)
 
+/** Every order the leaf solves — a full leaf and every shorter one, which is solved through a padded
+ * copy — at every side, triangle, transpose and layout, with B wide enough that a row-major B is
+ * updated by whole vectors and a remainder.
+ */
+private leaf_orders[T: Real](seed: u64)
+    for k in 1..trsm_leaf
+        check_all[T](k, 11, seed + u64(k) * 64)
+
+@test("trsm's substitution leaf is right at every order up to the leaf, every side, triangle, transpose and layout, f64")
+trsm_leaf_orders_f64()
+    leaf_orders[f64](51)
+
+@test("trsm's substitution leaf is right at every order up to the leaf, every side, triangle, transpose and layout, f32")
+trsm_leaf_orders_f32()
+    leaf_orders[f32](52)
+
+/** A zero on the diagonal at row `z` of a lower (or upper) triangle of order `k`, with ones below (above)
+ * it in its column and an identity elsewhere, solving a B of ones stored column-major or row-major:
+ * the rows solved before `z` must come back exactly one, and `z` and every row after it must not be
+ * finite — the infinity reaches the rows the reference substitution sends it to, and no others.
+ */
+private check_singular[T: Real](lower: bool, k: usize, z: usize, b_t: bool)
+    val store: Buf[T] = buf_filled(k * k, T.zero())
+    for i in 0..<k
+        store[i + i * k] = if i == z then T.zero() else T.one()
+    for p in 0..<k
+        if (lower && p > z) || (!lower && p < z)
+            store[p + z * k] = T.one()
+    val other: usize = 3
+    val bs: Buf[T] = buf_filled(k * other, T.one())
+    val bm = if b_t then matrix_mut(bs.view(), other, k, other).t() else matrix_mut(bs.view(), k, other, k)
+    var w: [1]T
+    trsm(Side.Left, if lower then Uplo.Lower else Uplo.Upper, Diag.NonUnit, T.one(), matrix(store.view(), k, k, k), bm, GemmWork(w[..], w[..]))
+    for j in 0..<other
+        for i in 0..<k
+            val before = if lower then i < z else i > z
+            if before
+                assert(bm.at(i, j) == T.one(), "a zero on the diagonal reached a row solved before it")
+            else
+                assert(!bm.at(i, j).is_finite(), "a zero on the diagonal did not reach a row that depends on it")
+
+/** Singular rows at every lane of the leaf's first vectors and at its last row, each triangle, both layouts. */
+private singular[T: Real]()
+    val rows: [6]usize = [0, 1, 2, 3, 4, 5]
+    for z in rows
+        for b_t in [false, true]
+            check_singular[T](true, 6, z, b_t)
+            check_singular[T](false, 6, z, b_t)
+            check_singular[T](true, trsm_leaf, if z == 5 then trsm_leaf - 1 else z, b_t)
+            check_singular[T](false, trsm_leaf, trsm_leaf - 1 - z, b_t)
+
+@test("a zero on trsm's diagonal reaches exactly the rows the substitution sends it to, f64")
+trsm_singular_f64()
+    singular[f64]()
+
+@test("a zero on trsm's diagonal reaches exactly the rows the substitution sends it to, f32")
+trsm_singular_f32()
+    singular[f32]()
+
 @test("the substitution leaf is a whole number of tiles at both widths, and the split stays on it")
 trsm_leaf_tiles()
     for (mr, _, _, _, _) in [gemm_blocking[f64](), gemm_blocking[f32]()]

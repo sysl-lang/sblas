@@ -43,16 +43,18 @@ private filled[T: Real](n: usize, g: *Gen) -> Buf[T]
  * element of C against the definition, and the padding between columns against what it was.
  */
 private check_def[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64)
-    check_def_layout[T](m, n, k, alpha, beta, seed, false)
+    check_def_layout[T](m, n, k, alpha, beta, seed, false, false)
 
-/** `check_def`, with A stored either column-major or as the transpose of a column-major `k` x `m`. */
-private check_def_layout[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_transposed: bool)
+/** `check_def`, with A stored either column-major or as the transpose of a column-major `k` x `m`, and B
+ * either column-major or as the transpose of a column-major `n` x `k`.
+ */
+private check_def_layout[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_transposed: bool, b_transposed: bool)
     var g = Gen(seed)
     val lda = if a_transposed then k + 1 else m + 1
-    val ldb = k + 1
+    val ldb = if b_transposed then n + 1 else k + 1
     val ldc = m + 1
     val a = filled[T](lda * (if a_transposed then m else k), &g)
-    val b = filled[T](ldb * n, &g)
+    val b = filled[T](ldb * (if b_transposed then k else n), &g)
     val c = filled[T](ldc * n, &g)
     val c0: Buf[T] = buf_filled(c.len(), T.zero())
     for i in 0..<c.len()
@@ -61,13 +63,15 @@ private check_def_layout[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: 
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
     val av = if a_transposed then matrix(a.view(), k, m, lda).t() else matrix(a.view(), m, k, lda)
-    gemm(alpha, av, matrix(b.view(), k, n, ldb), beta, matrix_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
+    val bv = if b_transposed then matrix(b.view(), n, k, ldb).t() else matrix(b.view(), k, n, ldb)
+    gemm(alpha, av, bv, beta, matrix_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
     for j in 0..<n
         for i in 0..<m
             var s = T.zero()
             for p in 0..<k
                 val aip = if a_transposed then a[p + i * lda] else a[i + p * lda]
-                s = s + aip * b[p + j * ldb]
+                val bpj = if b_transposed then b[j + p * ldb] else b[p + j * ldb]
+                s = s + aip * bpj
             assert(c[i + j * ldc] == alpha * s + beta * c0[i + j * ldc], "gemm differs from its definition")
         assert(c[m + j * ldc] == c0[m + j * ldc], "gemm wrote between C's columns")
 
@@ -95,26 +99,98 @@ private sweep[T: Real](seed: u64)
         check_def[T](mr + 3, n, 3, ratio[T](1, 2), ratio[T](1, 4), s)
         s += 1
 
-/** The micro-kernel takes two rank-1 updates per trip and the odd one alone, and packs a whole panel of
- * a column-major A by vectors: every depth either side of that, at the first and a later KC slice, with
- * A both column-major and transposed, full panels beside a fringe one.
+/** The micro-kernel takes two rank-1 updates per trip and the odd one alone; a whole panel of a
+ * column-major A is packed by vectors, and a whole panel of B by vectors V rows at a time (column-major)
+ * or a row at a time (row-major): every depth either side of those steps, at the first and a later KC
+ * slice, with A and B each column-major and transposed, full panels beside a fringe one.
  */
 private depths[T: Real](seed: u64)
     val (mr, nr, kc, _, _) = gemm_blocking[T]()
     var s = seed
-    for k in [1, 2, 3, 4, 5, kc - 1, kc + 1, kc + 2, kc + 3, 2 * kc - 1]
+    for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, kc - 1, kc + 1, kc + 2, kc + 3, kc + 5, 2 * kc - 1]
         for a_transposed in [false, true]
-            check_def_layout[T](2 * mr + 1, nr + 1, k, ratio[T](3, 2), ratio[T](-1, 2), s, a_transposed)
-            check_def_layout[T](mr, nr, k, T.one(), T.zero(), s + 1, a_transposed)
-            s += 2
+            for b_transposed in [false, true]
+                check_def_layout[T](2 * mr + 1, 2 * nr + 1, k, ratio[T](3, 2), ratio[T](-1, 2), s, a_transposed, b_transposed)
+                check_def_layout[T](mr, nr, k, ratio[T](-3, 4), T.zero(), s + 1, a_transposed, b_transposed)
+                s += 2
 
-@test("gemm's micro-kernel and A packing are right at every depth around their steps, f64")
+@test("gemm's micro-kernel and packing are right at every depth around their steps, f64")
 gemm_depths_f64()
     depths[f64](21)
 
-@test("gemm's micro-kernel and A packing are right at every depth around their steps, f32")
+@test("gemm's micro-kernel and packing are right at every depth around their steps, f32")
 gemm_depths_f32()
     depths[f32](22)
+
+/** Packs a `k` x `n` B stored column-major (`transposed` false) or as the transpose of a column-major
+ * `n` x `k`, with leading dimension one past the minimum, from row `p0` and column `j0`, and checks
+ * every element of every panel against the matrix, a fringe panel's padding against zero, and the
+ * buffer past the panels against the NaN it was seeded with.
+ */
+private check_pack_b[T: Real, const V: usize, const NR: usize](k: usize, n: usize, p0: usize, j0: usize, transposed: bool, seed: u64)
+    var g = Gen(seed)
+    val ld = if transposed then n + 1 else k + 1
+    val b = filled[T](ld * (if transposed then k else n), &g)
+    val bm = if transposed then matrix(b.view(), n, k, ld).t() else matrix(b.view(), k, n, ld)
+    val kc = k - p0
+    val nc = n - j0
+    val panels = (nc + NR - 1) / NR
+    val nan = T.zero() / T.zero()
+    val out: Buf[T] = buf_filled(panels * NR * kc + 3, nan)
+    pack_b[T, V, NR](bm, p0, kc, j0, nc, out.view())
+    for r in 0..<panels
+        for p in 0..<kc
+            for j in 0..<NR
+                val got = out[r * NR * kc + p * NR + j]
+                val col = r * NR + j
+                if col < nc
+                    assert(got == bm.at(p0 + p, j0 + col), "B's packing differs from the matrix")
+                else
+                    assert(got == T.zero(), "B's packing left a fringe column unpadded")
+    for i in panels * NR * kc..<out.len()
+        assert(out[i] != out[i], "B's packing wrote past its panels")
+
+/** B's packing at both layouts, at depths either side of whole V-row steps and widths either side of
+ * whole panels, from the matrix's corner and from inside it.
+ */
+private pack_b_shapes[T: Real, const V: usize](seed: u64)
+    val widths: [6]usize = [1, 5, 6, 7, 12, 13]
+    var s = seed
+    for k in [1, V - 1, V, V + 1, 2 * V + 1, 3 * V]
+        for n in widths
+            for transposed in [false, true]
+                check_pack_b[T, V, 6](k, n, 0, 0, transposed, s)
+                check_pack_b[T, V, 6](k + 3, n + 2, 3, 2, transposed, s + 1)
+                check_pack_b[T, V, 4](k, n, 0, 0, transposed, s + 2)
+                check_pack_b[T, V, V](k + 1, n + 1, 1, 1, transposed, s + 3)
+                s += 4
+
+@test("gemm's B packing matches the matrix at both layouts and every fringe, f64")
+gemm_pack_b_f64()
+    pack_b_shapes[f64, 2](41)
+
+@test("gemm's B packing matches the matrix at both layouts and every fringe, f32")
+gemm_pack_b_f32()
+    pack_b_shapes[f32, 4](42)
+
+/** Turns the V x V block whose column `j` holds `j * V + l` in lane `l`, and checks each row. */
+private check_transpose[T: Real, const V: usize]()
+    var cols: [V]<V>T
+    for const j in 0..<V
+        for const l in 0..<V
+            cols[j][l] = ratio[T](int(j * V + l), 1)
+    val rows = transpose[T, V](cols)
+    for const l in 0..<V
+        for const j in 0..<V
+            assert(rows[l][j] == ratio[T](int(j * V + l), 1), "the transpose put a lane in the wrong place")
+
+@test("the in-register transpose turns columns into rows at every width gemm packs with")
+gemm_transpose()
+    check_transpose[f64, 2]()
+    check_transpose[f32, 4]()
+    check_transpose[f32, 2]()
+    check_transpose[f64, 4]()
+    check_transpose[f32, 8]()
 
 /** The micro-kernel alone at one tile, against the definition: panels exactly `kc` steps long, so the
  * last step's vector loads of B end at the panel's last element, and a tile seeded with NaN, which
@@ -137,10 +213,10 @@ private check_micro[T: Real, const V: usize, const MV: usize, const NR: usize](k
 /** Every tile shape a target uses — AArch64's f64 8x6 and f32 16x6 (NR not a multiple of V, so the last
  * vector of B's row overlaps the one before it) and the fallback's f64 4x4 and f32 8x4 — plus an NR
  * one short of and one past a multiple of V, one of exactly V, and one of nine (two or more whole
- * vectors at both widths), at depths either side of the two-step unroll.
+ * vectors at both widths), at depths either side of one and two trips of the unrolled loop.
  */
 private micro_shapes[T: Real, const V: usize](seed: u64)
-    val depths: [5]usize = [1, 2, 3, 4, 7]
+    val depths: [9]usize = [1, 2, 3, 4, 5, 7, 8, 9, 13]
     var s = seed
     for kc in depths
         check_micro[T, V, 4, 6](kc, s)
