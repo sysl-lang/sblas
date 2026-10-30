@@ -64,7 +64,7 @@ dependencies {
 }
 ```
 
-Needs sysl 0.8.0.
+Needs sysl 0.8.1.
 
 ## Layout
 

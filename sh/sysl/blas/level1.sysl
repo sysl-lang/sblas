@@ -1,20 +1,23 @@
 module sh.sysl.blas
 @no_alloc
 
+import sysl.hint.prefetch
+
 // Level 1: vector-vector routines, O(n) work on O(n) data.
 //
 // A routine has up to two paths. When the views it reads are contiguous and pair their elements the
 // way their storage does (both strides 1, or both -1), the work is a slice kernel over vectors of
-// `W` elements; otherwise it is a scalar walk that follows each stride. `asum`, `nrm2` and `iamax`
-// only walk for now: each needs a lane's magnitude, and a vector has no `abs` until sysl 0.8.1
-// (spelling it `(v < 0).select(-v, v)` is the longhand that gap would force). A routine given views of
-// different lengths traps: BLAS passes one `n`, and two views that disagree about it are a bug in
-// the caller.
+// `W` elements; otherwise it is a scalar walk that follows each stride. `asum` and `nrm2` take the
+// kernel at either stride sign, since neither depends on the order it adds in; `iamax` takes it only
+// forwards, where its first index in BLAS order is the first in storage. A routine given views of
+// different lengths traps: BLAS passes one `n`, and two views that disagree about it are a bug in the
+// caller.
 //
-// A walk checks once, before it starts, that every element it will visit is inside the storage, and
-// then reads and writes `@unchecked`: the stride arithmetic is beyond what the optimizer can prove,
-// so a per-element check would otherwise survive in the loop. A kernel's vector loads and stores are
-// each checked as a run; its scalar tail is not, because the optimizer proves that one itself.
+// Both paths check once, before they start, that every element they will visit is inside the
+// storage, and then read and write `@unchecked`. A walk's stride arithmetic is beyond what the
+// optimizer can prove; a kernel's slices are each checked to be as long as the first, after which
+// every vector load and store, and every element of the scalar tail, is in bounds by the loop's own
+// condition. Either way the loops carry no check of their own.
 
 /** Bytes per kernel step: eight 128-bit registers, so f32 runs 32 wide and f64 16 wide. Eight
  * independent accumulators are what keep a reduction's adds from waiting on each other.
@@ -34,77 +37,187 @@ private span_mut[T](data: []T, len: usize) -> []T = data[0..<len]
 
 // --- Contiguous kernels ---------------------------------------------------------------------------
 
+/** Traps unless a kernel's second slice is as long as its first: the one check a kernel makes. */
+private[blas] runs(first: usize, other: usize)
+    assert(first == other, "a kernel's slices have different lengths")
+
 private[blas] dot_kernel[T: Real, const W: usize](x: []const T, y: []const T) -> T
+    runs(x.len, y.len)
     var acc: <W>T = T.zero()
     var i: usize = 0
-    while i + W <= x.len
-        val a: <W>T = x.load(i)
-        acc = acc + a * y.load(i)
-        i += W
-    var s = acc.sum()
-    while i < x.len
-        s = s + x[i] * y[i]
-        i += 1
-    s
+    @unchecked
+        while i + W <= x.len
+            prefetch(&x[i + 1024 / sizeof(T)])
+            prefetch(&y[i + 1024 / sizeof(T)])
+            val a: <W>T = x.load(i)
+            val b: <W>T = y.load(i)
+            acc = a.mul_add(b, acc)
+            i += W
+        var s = acc.sum()
+        while i < x.len
+            s = x[i] * y[i] + s
+            i += 1
+        s
 
 private[blas] axpy_kernel[T: Real, const W: usize](alpha: T, x: []const T, y: []T)
+    runs(x.len, y.len)
     var i: usize = 0
-    while i + W <= x.len
-        val a: <W>T = x.load(i)
-        y.store(i, a * alpha + y.load(i))
-        i += W
-    while i < x.len
-        y[i] = x[i] * alpha + y[i]
-        i += 1
+    @unchecked
+        while i + W <= x.len
+            prefetch(&x[i + 1024 / sizeof(T)])
+            prefetch(&y[i + 1024 / sizeof(T)])
+            val a: <W>T = x.load(i)
+            val b: <W>T = y.load(i)
+            y.store(i, a.mul_add(alpha, b))
+            i += W
+        while i < x.len
+            y[i] = x[i] * alpha + y[i]
+            i += 1
 
 private scal_kernel[T: Real, const W: usize](alpha: T, x: []T)
     var i: usize = 0
-    while i + W <= x.len
-        val a: <W>T = x.load(i)
-        x.store(i, a * alpha)
-        i += W
-    while i < x.len
-        x[i] = x[i] * alpha
-        i += 1
+    @unchecked
+        while i + W <= x.len
+            val a: <W>T = x.load(i)
+            x.store(i, a * alpha)
+            i += W
+        while i < x.len
+            x[i] = x[i] * alpha
+            i += 1
 
 private copy_kernel[T: Real, const W: usize](x: []const T, y: []T)
+    runs(x.len, y.len)
     var i: usize = 0
-    while i + W <= x.len
-        val a: <W>T = x.load(i)
-        y.store(i, a)
-        i += W
-    while i < x.len
-        y[i] = x[i]
-        i += 1
+    @unchecked
+        while i + W <= x.len
+            val a: <W>T = x.load(i)
+            y.store(i, a)
+            i += W
+        while i < x.len
+            y[i] = x[i]
+            i += 1
 
 private swap_kernel[T: Real, const W: usize](x: []T, y: []T)
+    runs(x.len, y.len)
     var i: usize = 0
-    while i + W <= x.len
-        val a: <W>T = x.load(i)
-        val b: <W>T = y.load(i)
-        x.store(i, b)
-        y.store(i, a)
-        i += W
-    while i < x.len
-        val t = x[i]
-        x[i] = y[i]
-        y[i] = t
-        i += 1
+    @unchecked
+        while i + W <= x.len
+            val a: <W>T = x.load(i)
+            val b: <W>T = y.load(i)
+            x.store(i, b)
+            y.store(i, a)
+            i += W
+        while i < x.len
+            val t = x[i]
+            x[i] = y[i]
+            y[i] = t
+            i += 1
 
 private rot_kernel[T: Real, const W: usize](x: []T, y: []T, c: T, s: T)
+    runs(x.len, y.len)
     var i: usize = 0
-    while i + W <= x.len
-        val a: <W>T = x.load(i)
-        val b: <W>T = y.load(i)
-        x.store(i, a * c + b * s)
-        y.store(i, b * c - a * s)
-        i += W
-    while i < x.len
-        val a = x[i]
-        val b = y[i]
-        x[i] = a * c + b * s
-        y[i] = b * c - a * s
-        i += 1
+    @unchecked
+        while i + W <= x.len
+            val a: <W>T = x.load(i)
+            val b: <W>T = y.load(i)
+            x.store(i, a * c + b * s)
+            y.store(i, b * c - a * s)
+            i += W
+        while i < x.len
+            val a = x[i]
+            val b = y[i]
+            x[i] = a * c + b * s
+            y[i] = b * c - a * s
+            i += 1
+
+/** The sum of `|x[i]|`. */
+private asum_kernel[T: Real, const W: usize](x: []const T) -> T
+    var acc: <W>T = T.zero()
+    var i: usize = 0
+    @unchecked
+        while i + W <= x.len
+            val a: <W>T = x.load(i)
+            acc = acc + a.abs()
+            i += W
+        var s = acc.sum()
+        while i < x.len
+            s = s + x[i].abs()
+            i += 1
+        s
+
+/** `nrm2`'s three sums over `x`, each lane keeping its own; a lane's band is chosen by mask. A NaN is
+ * in neither outer band, so it lands in the middle sum, as the scalar `Blue.add` puts it.
+ */
+private nrm2_kernel[T: Real, const W: usize](x: []const T) -> Blue[T]
+    val big = T.blue_big()
+    val small = T.blue_small()
+    val sbig = T.blue_scale_big()
+    val ssml = T.blue_scale_small()
+    var lo: <W>T = T.zero()
+    var mid: <W>T = T.zero()
+    var hi: <W>T = T.zero()
+    var i: usize = 0
+    @unchecked
+        while i + W <= x.len
+            val v: <W>T = x.load(i)
+            val ax = v.abs()
+            val above = ax > big
+            val below = ax < small
+            val b = above.select(ax * sbig, T.zero())
+            val s = below.select(ax * ssml, T.zero())
+            val m = (above | below).select(T.zero(), ax)
+            hi = b.mul_add(b, hi)
+            lo = s.mul_add(s, lo)
+            mid = m.mul_add(m, mid)
+            i += W
+        var sums = Blue(lo.sum(), mid.sum(), hi.sum())
+        while i < x.len
+            sums = sums.add(x[i])
+            i += 1
+        sums
+
+/** Elements of `x` per chunk of `iamax_kernel`: small enough that a chunk read twice is read from L1. */
+private const iamax_chunk_bytes: usize = 16384
+
+/** `iamax` of a non-empty contiguous `x`, read forwards.
+ *
+ * A chunk at a time: the lane-wise largest magnitude first, NaN lanes never chosen, and only when that
+ * beats every chunk before it a second pass, from L1, for the first element that has it. A later
+ * chunk that merely ties is not searched, so ties go to the earliest index.
+ */
+private iamax_kernel[T: Real, const W: usize](x: []const T) -> usize
+    val chunk = iamax_chunk_bytes / sizeof(T)
+    var top = -T.one()
+    var best: usize = 0
+    var c0: usize = 0
+    @unchecked
+        if x[0].is_nan() then return 0
+        while c0 < x.len
+            val c1 = if x.len - c0 > chunk then c0 + chunk else x.len
+            var lanes: <W>T = -T.one()
+            var i = c0
+            while i + W <= c1
+                val v: <W>T = x.load(i)
+                val a = v.abs()
+                lanes = (a > lanes).select(a, lanes)
+                i += W
+            var m = lanes.max()
+            while i < c1
+                val a = x[i].abs()
+                if a > m then m = a
+                i += 1
+            if m > top
+                top = m
+                var j = c0
+                while j + W <= c1
+                    val v: <W>T = x.load(j)
+                    if (v.abs() == m).any() then break
+                    j += W
+                while x[j].abs() != m
+                    j += 1
+                best = j
+            c0 = c1
+    best
 
 /** Blue's three sums of squares — scaled small, middle, scaled big — that `nrm2` combines. */
 private struct Blue[T]
@@ -191,6 +304,7 @@ dot[T: Real](x: Strided[T], y: Strided[T]) -> T
  * element. A NaN anywhere gives NaN; an infinity, infinity.
  */
 nrm2[T: Real](x: Strided[T]) -> T
+    if x.inc == 1 || x.inc == -1 || x.len <= 1 then return nrm2_kernel[T, block_bytes / sizeof(T)](span(x.data, x.len)).norm()
     walkable(x.data.len, x.len, x.inc)
     var sums = Blue(T.zero(), T.zero(), T.zero())
     var ix = x.first()
@@ -202,6 +316,7 @@ nrm2[T: Real](x: Strided[T]) -> T
 
 /** The sum of `|x[i]|`. */
 asum[T: Real](x: Strided[T]) -> T
+    if x.inc == 1 || x.inc == -1 || x.len <= 1 then return asum_kernel[T, block_bytes / sizeof(T)](span(x.data, x.len))
     walkable(x.data.len, x.len, x.inc)
     var s = T.zero()
     var ix = x.first()
@@ -264,6 +379,7 @@ swap[T: Real](x: StridedMut[T], y: StridedMut[T])
  */
 iamax[T: Real](x: Strided[T]) -> Option[usize]
     if x.len == 0 then return None
+    if x.inc == 1 || x.len == 1 then return Some(iamax_kernel[T, block_bytes / sizeof(T)](span(x.data, x.len)))
     walkable(x.data.len, x.len, x.inc)
     var best: usize = 0
     var ix = x.first()

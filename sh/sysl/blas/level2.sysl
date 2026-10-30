@@ -39,58 +39,68 @@ private dim(want: usize, len: usize)
 
 /** `y := c0 * s0 + c1 * s1 + c2 * s2 + c3 * s3 + y`, added in that order. */
 private cols4_kernel[T: Real, const W: usize](c0: []const T, c1: []const T, c2: []const T, c3: []const T, s0: T, s1: T, s2: T, s3: T, y: []T)
+    runs(y.len, c0.len)
+    runs(y.len, c1.len)
+    runs(y.len, c2.len)
+    runs(y.len, c3.len)
     var i: usize = 0
-    while i + W <= y.len
-        var acc: <W>T = y.load(i)
-        val a0: <W>T = c0.load(i)
-        acc = a0 * s0 + acc
-        val a1: <W>T = c1.load(i)
-        acc = a1 * s1 + acc
-        val a2: <W>T = c2.load(i)
-        acc = a2 * s2 + acc
-        val a3: <W>T = c3.load(i)
-        acc = a3 * s3 + acc
-        y.store(i, acc)
-        i += W
-    while i < y.len
-        var v = y[i]
-        v = c0[i] * s0 + v
-        v = c1[i] * s1 + v
-        v = c2[i] * s2 + v
-        v = c3[i] * s3 + v
-        y[i] = v
-        i += 1
+    @unchecked
+        while i + W <= y.len
+            var acc: <W>T = y.load(i)
+            val a0: <W>T = c0.load(i)
+            acc = a0.mul_add(s0, acc)
+            val a1: <W>T = c1.load(i)
+            acc = a1.mul_add(s1, acc)
+            val a2: <W>T = c2.load(i)
+            acc = a2.mul_add(s2, acc)
+            val a3: <W>T = c3.load(i)
+            acc = a3.mul_add(s3, acc)
+            y.store(i, acc)
+            i += W
+        while i < y.len
+            var v = y[i]
+            v = c0[i] * s0 + v
+            v = c1[i] * s1 + v
+            v = c2[i] * s2 + v
+            v = c3[i] * s3 + v
+            y[i] = v
+            i += 1
 
 /** The dot products of four rows with `x`, sharing each load of `x`. */
 private dot4_kernel[T: Real, const V: usize](r0: []const T, r1: []const T, r2: []const T, r3: []const T, x: []const T) -> (T, T, T, T)
+    runs(x.len, r0.len)
+    runs(x.len, r1.len)
+    runs(x.len, r2.len)
+    runs(x.len, r3.len)
     var s0: <V>T = T.zero()
     var s1: <V>T = T.zero()
     var s2: <V>T = T.zero()
     var s3: <V>T = T.zero()
     var i: usize = 0
-    while i + V <= x.len
-        val xv: <V>T = x.load(i)
-        val a0: <V>T = r0.load(i)
-        s0 = a0 * xv + s0
-        val a1: <V>T = r1.load(i)
-        s1 = a1 * xv + s1
-        val a2: <V>T = r2.load(i)
-        s2 = a2 * xv + s2
-        val a3: <V>T = r3.load(i)
-        s3 = a3 * xv + s3
-        i += V
-    var t0 = s0.sum()
-    var t1 = s1.sum()
-    var t2 = s2.sum()
-    var t3 = s3.sum()
-    while i < x.len
-        val xi = x[i]
-        t0 = r0[i] * xi + t0
-        t1 = r1[i] * xi + t1
-        t2 = r2[i] * xi + t2
-        t3 = r3[i] * xi + t3
-        i += 1
-    (t0, t1, t2, t3)
+    @unchecked
+        while i + V <= x.len
+            val xv: <V>T = x.load(i)
+            val a0: <V>T = r0.load(i)
+            s0 = a0.mul_add(xv, s0)
+            val a1: <V>T = r1.load(i)
+            s1 = a1.mul_add(xv, s1)
+            val a2: <V>T = r2.load(i)
+            s2 = a2.mul_add(xv, s2)
+            val a3: <V>T = r3.load(i)
+            s3 = a3.mul_add(xv, s3)
+            i += V
+        var t0 = s0.sum()
+        var t1 = s1.sum()
+        var t2 = s2.sum()
+        var t3 = s3.sum()
+        while i < x.len
+            val xi = x[i]
+            t0 = r0[i] * xi + t0
+            t1 = r1[i] * xi + t1
+            t2 = r2[i] * xi + t2
+            t3 = r3[i] * xi + t3
+            i += 1
+        (t0, t1, t2, t3)
 
 /** `y += alpha * a * x` for a matrix whose columns are contiguous, into a contiguous `y`. */
 private gemv_cols[T: Real](alpha: T, a: Matrix[T], x: Strided[T], y: []T)

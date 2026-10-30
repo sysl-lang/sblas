@@ -1,0 +1,259 @@
+module sh.sysl.blas
+@no_alloc
+@tests
+
+// The vector kernels of `asum`, `nrm2` and `iamax` against the scalar walk and the definitions: every
+// length around the vector width, every special value at every position, and `iamax`'s ties and NaN
+// rule inside a vector, across vectors, in the tail and across its chunks.
+
+private near[T: Real](got: T, want: T, ulps: T) -> bool = (got - want).abs() <= ulps * T.epsilon() * want.abs()
+
+/** `iamax` by its definition: the first index of the largest magnitude, a NaN never larger. */
+private first_largest[T: Real](xs: []const T) -> usize
+    var best: usize = 0
+    for i in 1..<xs.len
+        if xs[i].abs() > xs[best].abs() then best = i
+    best
+
+/** Fills `xs` from `pattern`, stepping through it by 7 so that neighbours differ, and every other
+ * element of `wide` with the same values; `wide`'s gaps hold a value no routine may see.
+ */
+private spread[T: Real](pattern: []const T, xs: []T, wide: []T)
+    for i in 0..<xs.len
+        xs[i] = pattern[(7 * i) % pattern.len]
+        wide[2 * i] = xs[i]
+        wide[2 * i + 1] = T.max_value()
+
+/** Every prefix of `xs`, by kernel (forwards and backwards) and by walk, agrees. */
+private prefixes_agree[T: Real](pattern: []const T, xs: []T, wide: []T) -> bool
+    spread(pattern, xs, wide)
+    var n: usize = 0
+    while n <= xs.len
+        val v = view(xs[0..<n])
+        val back = strided(xs[0..<n], n, -1)
+        val walk = strided(wide[..], n, 2)
+        if !near(asum(v), asum(walk), 64) || !near(asum(back), asum(walk), 64) then return false
+        if !near(nrm2(v), nrm2(walk), 64) || !near(nrm2(back), nrm2(walk), 64) then return false
+        val want = if n == 0 then None else Some(first_largest(xs[0..<n]))
+        if iamax(v) != want || iamax(walk) != want then return false
+        n += 1
+    true
+
+@test("asum, nrm2 and iamax agree with the walk at every length around the vector width, f64")
+kernel_lengths_f64()
+    var xs: [70]f64
+    var wide: [140]f64
+    val mixed: [11]f64 = [1, -2.5, 3, 0.25, -7, 2, -0.0, 6.5, -1, 4, 0]
+    assert(prefixes_agree(mixed[..], xs[..], wide[..]), "middle band")
+    val bands: [8]f64 = [1e300, -2e300, 1e-300, -3e-300, 0.5, -1, 1e-310, 7]
+    assert(prefixes_agree(bands[..], xs[..], wide[..]), "every band, denormals included")
+
+@test("asum, nrm2 and iamax agree with the walk at every length around the vector width, f32")
+kernel_lengths_f32()
+    var xs: [70]f32
+    var wide: [140]f32
+    val mixed: [11]f32 = [1, -2.5, 3, 0.25, -7, 2, -0.0, 6.5, -1, 4, 0]
+    assert(prefixes_agree(mixed[..], xs[..], wide[..]), "middle band")
+    val bands: [8]f32 = [1e30, -2e30, 1e-30, -3e-30, 0.5, -1, 1e-40, 7]
+    assert(prefixes_agree(bands[..], xs[..], wide[..]), "every band, denormals included")
+
+// A kernel's loops are unchecked once its slices are shown to be the same length, so a kernel handed
+// two of different lengths must trap before it reads either.
+
+@test("dot's kernel handed a shorter second slice traps before it reads", should_trap)
+dot_kernel_short()
+    var xs: [40]f64
+    print(dot_kernel[f64, 16](xs[..], xs[0..<39]))
+
+@test("axpy's kernel handed a shorter destination traps before it writes", should_trap)
+axpy_kernel_short()
+    var xs: [40]f32
+    var ys: [40]f32
+    axpy_kernel[f32, 32](2, xs[..], ys[0..<33])
+
+@test("axpy's kernel handed a longer destination traps too: the lengths must agree", should_trap)
+axpy_kernel_long()
+    var xs: [40]f32
+    var ys: [40]f32
+    axpy_kernel[f32, 32](2, xs[0..<33], ys[..])
+
+// --- asum -----------------------------------------------------------------------------------------
+
+@test("asum of zeros of either sign is +0, and a NaN or an infinity anywhere survives it")
+asum_specials()
+    var xs: [37]f64
+    for i in 0..<37
+        xs[i] = if i % 2 == 0 then -0.0 else 0.0
+    assert(1.0 / asum(view(xs[..])) == f64.infinity(), "+0")
+    for k in 0..<37
+        xs[k] = f64.nan()
+        assert(asum(view(xs[..])).is_nan(), "NaN")
+        xs[k] = -f64.infinity()
+        assert(asum(view(xs[..])) == f64.infinity(), "-infinity")
+        xs[k] = 0
+    var fs: [37]f32
+    fs[36] = f32.infinity()
+    fs[0] = -f32.infinity()
+    assert(asum(view(fs[..])) == f32.infinity(), "infinities of both signs add")
+    fs[20] = f32.nan()
+    assert(asum(view(fs[..])).is_nan(), "NaN beside infinities")
+
+@test("asum of a hand-built contiguous view past its data traps", should_trap)
+asum_kernel_past_the_end()
+    val xs: [4]f64 = [1, 2, 3, 4]
+    print(asum(Strided(xs[..], 5, 1)))
+
+// --- nrm2 -----------------------------------------------------------------------------------------
+
+@test("nrm2: a NaN at every position of a long run is NaN, an infinity is infinity, both are NaN")
+nrm2_specials_everywhere()
+    var xs: [41]f64
+    for k in 0..<41
+        for i in 0..<41
+            xs[i] = if i % 3 == 0 then 1e-300 else if i % 3 == 1 then 2 else 1e300
+        xs[k] = f64.nan()
+        assert(nrm2(view(xs[..])).is_nan(), "NaN")
+        xs[k] = -f64.infinity()
+        assert(nrm2(view(xs[..])) == f64.infinity(), "infinity")
+        xs[(k + 17) % 41] = f64.nan()
+        assert(nrm2(view(xs[..])).is_nan(), "infinity and NaN")
+
+@test("nrm2 keeps its scaling at every length: n copies of a huge, tiny or denormal value")
+nrm2_band_lengths()
+    var xs: [35]f64
+    var fs: [35]f32
+    for n in 1..<36
+        for i in 0..<n
+            xs[i] = 1e300
+            fs[i] = -1e30
+        val r = f64(n).sqrt()
+        assert(near(nrm2(view(xs[0..<n])), 1e300 * r, 4), "huge, f64")
+        assert(near(nrm2(view(fs[0..<n])), 1e30 * f32(n).sqrt(), 4), "huge, f32")
+        for i in 0..<n
+            xs[i] = -3e-300
+            fs[i] = 3e-30
+        assert(near(nrm2(view(xs[0..<n])), 3e-300 * r, 4), "tiny, f64")
+        assert(near(nrm2(view(fs[0..<n])), 3e-30 * f32(n).sqrt(), 4), "tiny, f32")
+    // Each side of each band's edge, where a value counted in two bands, or in the wrong one, shows:
+    // just below the small edge a square is still a (denormal) number, not zero.
+    val edges: [6]f64 = [0x1p-512, 0x1p-511, 0x1p-510, 0x1p485, 0x1p486, 0x1p487]
+    val edgesf: [6]f32 = [0x1p-64, 0x1p-63, 0x1p-62, 0x1p51, 0x1p52, 0x1p53]
+    for e in 0..<6
+        for n in 1..<36
+            for i in 0..<n
+                xs[i] = if i % 2 == 0 then edges[e] else -edges[e]
+                fs[i] = if i % 2 == 0 then -edgesf[e] else edgesf[e]
+            assert(near(nrm2(view(xs[0..<n])), edges[e] * f64(n).sqrt(), 4), "band edge, f64")
+            assert(near(nrm2(view(fs[0..<n])), edgesf[e] * f32(n).sqrt(), 4), "band edge, f32")
+    // A denormal answer has fewer bits than any ulps bound assumes, so only where it is exact: n a square.
+    for root in 1..<6
+        val n = root * root
+        for i in 0..<n
+            xs[i] = -0x1p-1060
+            fs[i] = 0x1p-140
+        assert(nrm2(view(xs[0..<n])) == 0x1p-1060 * f64(root), "denormal, f64")
+        assert(nrm2(view(fs[0..<n])) == 0x1p-140 * f32(root), "denormal, f32")
+
+@test("nrm2 of a hand-built contiguous view past its data traps", should_trap)
+nrm2_kernel_past_the_end()
+    val xs: [4]f64 = [1, 2, 3, 4]
+    print(nrm2(Strided(xs[..], 5, -1)))
+
+// --- iamax ----------------------------------------------------------------------------------------
+
+@test("iamax of equal magnitudes is 0, at every length around the vector width")
+iamax_all_equal()
+    var xs: [40]f64
+    var fs: [40]f32
+    for i in 0..<40
+        xs[i] = if i % 2 == 0 then 3 else -3
+        fs[i] = if i % 3 == 0 then -0.0 else 0.0
+    for n in 1..<41
+        assert(iamax(view(xs[0..<n])) == Some(0), "±3")
+        assert(iamax(view(fs[0..<n])) == Some(0), "±0")
+
+@test("iamax takes the earlier of two ties inside a vector, across vectors and in the tail")
+iamax_lane_ties()
+    var xs: [37]f64
+    xs[6] = 5
+    xs[3] = -5
+    assert(iamax(view(xs[..])) == Some(3), "one vector")
+    xs[3] = 0
+    xs[6] = 0
+    xs[13] = 5
+    xs[29] = -5
+    assert(iamax(view(xs[..])) == Some(13), "two vectors")
+    xs[13] = 0
+    xs[36] = 5
+    assert(iamax(view(xs[..])) == Some(29), "vector and tail")
+    xs[29] = 0
+    xs[35] = -5
+    assert(iamax(view(xs[..])) == Some(35), "tail")
+    var fs: [37]f32
+    fs[17] = -2
+    fs[1] = 2
+    fs[33] = 2
+    assert(iamax(view(fs[..])) == Some(1), "f32")
+
+@test("iamax finds an infinity of either sign, the first when there are two")
+iamax_infinities()
+    var xs: [37]f64
+    for i in 0..<37
+        xs[i] = f64.max_value()
+    xs[17] = -f64.infinity()
+    assert(iamax(view(xs[..])) == Some(17))
+    xs[9] = f64.infinity()
+    assert(iamax(view(xs[..])) == Some(9))
+
+@test("iamax: a NaN at element 0 is chosen whatever follows; a NaN anywhere else never is")
+iamax_nan_positions()
+    var xs: [37]f64
+    for i in 0..<37
+        xs[i] = f64(i % 5)
+    xs[0] = f64.nan()
+    xs[30] = f64.infinity()
+    assert(iamax(view(xs[..])) == Some(0), "NaN first, infinity later")
+    for k in 1..<37
+        for i in 0..<37
+            xs[i] = f64(i % 5)
+        xs[k] = f64.nan()
+        assert(iamax(view(xs[..])) == Some(if k == 4 then 9 else 4), "NaN at k")
+    for i in 1..<37
+        xs[i] = f64.nan()
+    xs[0] = -1
+    assert(iamax(view(xs[..])) == Some(0), "everything after element 0 a NaN")
+    xs[0] = f64.nan()
+    assert(iamax(view(xs[..])) == Some(0), "every element a NaN")
+    var fs: [33]f32
+    fs[32] = f32.nan()
+    fs[31] = 1
+    fs[15] = f32.nan()
+    assert(iamax(view(fs[..])) == Some(31), "NaN in the tail and in a vector")
+
+@test("iamax across chunks: ties to the earlier chunk, a larger value in a later one, NaN at a chunk's start")
+iamax_chunks()
+    var xs: [5000]f64
+    xs[100] = 4
+    xs[3000] = -4
+    assert(iamax(view(xs[..])) == Some(100), "tie across chunks")
+    xs[4100] = 4.5
+    assert(iamax(view(xs[..])) == Some(4100), "larger in the last chunk")
+    xs[2047] = 9
+    xs[2048] = -9
+    assert(iamax(view(xs[..])) == Some(2047), "tie on a chunk boundary")
+    xs[2048] = f64.nan()
+    xs[2049] = 10
+    assert(iamax(view(xs[..])) == Some(2049), "NaN starting a chunk")
+    for i in 0..<5000
+        xs[i] = f64(i)
+    assert(iamax(view(xs[..])) == Some(4999), "every chunk larger than the last")
+    var fs: [9000]f32
+    fs[4095] = -1
+    fs[4096] = 1
+    fs[8999] = 1
+    assert(iamax(view(fs[..])) == Some(4095), "f32, tie on a chunk boundary")
+
+@test("iamax of a hand-built contiguous view past its data traps", should_trap)
+iamax_kernel_past_the_end()
+    val xs: [4]f64 = [1, 2, 3, 4]
+    print(iamax(Strided(xs[..], 5, 1)))
