@@ -88,5 +88,10 @@ better except `iamax` (76–106%), `copy` beyond L1 (75–85%), `ger` in f64 (91
 `nrm2` is 2.3x
 OpenBLAS at f64 and 4.3–4.7x at f32. Figures in [bench/README.md](bench/README.md).
 
+`gemm` is BLIS's five loops around an 8x6 (f64) or 16x6 (f32) micro-kernel of `fmla` by element,
+with both panels packed by vectors; single-threaded on an M5 Pro it runs at 103–124% of OpenBLAS's
+NEON gemm from n = 128 at f64 and 96–108% at f32. `trsm` recurses onto gemm and solves its 16-row
+leaves in registers: 103–246% of OpenBLAS at every size.
+
 `sysl test .` runs the package and the oracle; under ASan,
 `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`.

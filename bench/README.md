@@ -131,42 +131,58 @@ What the numbers say:
   matrix streams moved its DRAM figures up 5–12% of OpenBLAS's but its L2 ones down 3–10%. The
   hardware prefetcher already follows these sequential streams.
 
-## gemm: Apple M5 Pro, sysl 0.8.0, OpenBLAS 0.3.34, 2026-10-29
+## gemm and trsm: Apple M5 Pro, sysl 0.8.1, OpenBLAS 0.3.34, 2026-10-30
 
-`./bench gemm`: square column-major `C += A * B`, GFLOPS (2n³ per call), median of seven
-interleaved trials of about 4e9 flops, single-threaded, load average 8.9 (1 min) at start, 8.2 at
-the end. sysl's packing buffers are allocated once outside the timing.
+`./bench gemm`: square column-major `C += A * B`, GFLOPS (2n³ per call). `./bench trsm`: square
+column-major `B := A⁻¹ B`, A lower and non-unit, GFLOPS (n³ per call). Median of seven interleaved
+trials of about 4e9 flops, single-threaded; load average 7.1–8.4 (1 min) across the two runs. sysl's
+packing buffers are allocated once outside the timing.
 
 | type | routine | n | sysl | Accelerate | OpenBLAS | % Acc | % OB |
 |---|---|---|---:|---:|---:|---:|---:|
-| f64 | gemm | 64 | 51.4 | 204.5 | 25.5 | 25 | 202 |
-| f64 | gemm | 128 | 55.9 | 293.5 | 43.6 | 19 | 128 |
-| f64 | gemm | 256 | 60.4 | 315.7 | 54.4 | 19 | 111 |
-| f64 | gemm | 512 | 59.7 | 344.3 | 58.2 | 17 | 102 |
-| f64 | gemm | 1024 | 61.0 | 200.0 | 59.2 | 30 | 103 |
-| f64 | gemm | 2048 | 61.4 | 374.2 | 59.4 | 16 | 104 |
-| f32 | gemm | 64 | 97.3 | 678.9 | 111.4 | 14 | 87 |
-| f32 | gemm | 128 | 110.6 | 866.1 | 114.9 | 13 | 96 |
-| f32 | gemm | 256 | 119.0 | 1190.9 | 116.5 | 10 | 102 |
-| f32 | gemm | 512 | 124.4 | 1303.5 | 118.2 | 10 | 105 |
-| f32 | gemm | 1024 | 123.3 | 1406.3 | 119.1 | 9 | 104 |
-| f32 | gemm | 2048 | 126.7 | 1455.8 | 119.3 | 9 | 106 |
+| f64 | gemm | 64 | 48.2 | 162.4 | 24.5 | 30 | 197 |
+| f64 | gemm | 128 | 52.4 | 282.4 | 42.1 | 19 | 124 |
+| f64 | gemm | 256 | 57.0 | 250.7 | 50.6 | 23 | 113 |
+| f64 | gemm | 512 | 56.7 | 280.4 | 53.4 | 20 | 106 |
+| f64 | gemm | 1024 | 54.7 | 106.9 | 53.1 | 51 | 103 |
+| f64 | gemm | 2048 | 57.4 | 344.5 | 54.1 | 17 | 106 |
+| f32 | gemm | 64 | 98.3 | 661.6 | 101.9 | 15 | 96 |
+| f32 | gemm | 128 | 107.8 | 802.4 | 106.5 | 13 | 101 |
+| f32 | gemm | 256 | 114.1 | 1137.4 | 107.8 | 10 | 106 |
+| f32 | gemm | 512 | 117.5 | 1098.0 | 109.5 | 11 | 107 |
+| f32 | gemm | 1024 | 113.6 | 511.4 | 106.9 | 22 | 106 |
+| f32 | gemm | 2048 | 117.7 | 1181.6 | 108.7 | 10 | 108 |
+| f64 | trsm | 64 | 28.3 | 30.1 | 11.5 | 94 | 246 |
+| f64 | trsm | 128 | 35.8 | 57.6 | 22.2 | 62 | 161 |
+| f64 | trsm | 256 | 42.8 | 92.2 | 33.2 | 46 | 129 |
+| f64 | trsm | 512 | 47.6 | 127.1 | 41.6 | 37 | 114 |
+| f64 | trsm | 1024 | 49.6 | 163.5 | 45.9 | 30 | 108 |
+| f64 | trsm | 2048 | 51.4 | 216.6 | 49.9 | 24 | 103 |
+| f32 | trsm | 64 | 39.4 | 58.2 | 16.5 | 68 | 239 |
+| f32 | trsm | 128 | 58.5 | 107.0 | 29.4 | 55 | 199 |
+| f32 | trsm | 256 | 75.5 | 199.2 | 47.2 | 38 | 160 |
+| f32 | trsm | 512 | 91.3 | 321.0 | 65.4 | 28 | 139 |
+| f32 | trsm | 1024 | 99.1 | 457.6 | 80.8 | 22 | 123 |
+| f32 | trsm | 2048 | 104.1 | 601.2 | 92.5 | 17 | 113 |
 
-- **102–111% of OpenBLAS from n = 256 up, at both widths**; ahead of it at small f64 sizes, where
-  OpenBLAS's own setup dominates, and 87–96% of it at small f32 sizes. Accelerate is SME (8–24%),
-  out of scope as the target. The untuned structure was 93–97% from n = 512 up (55.6 / 115.4 GFLOPS
-  at n = 2048).
-- **What the tuning changed, measured one change at a time** (n = 2048, f64 / f32): the k loop taking
-  two steps per trip, 54.8 → 61.8 / 113.1 → 125.9 — the inner loop goes from 47 instructions per step
-  to 88 per two; unrolling by three or four is slower, as LLVM then loads every step's A column ahead
-  and spills (57 instructions a step). A whole column-major A panel packed by vectors: +1–3% at
-  n = 64–128, nothing measurable above. Kept out: writing a full tile straight from the accumulators
-  to C (within noise at every size), and passing the panels as offsets instead of sub-slices (the
-  reference counts stay; DESIGN.md).
-- **B's row read as vectors** (`for const` over its lanes) against six scalar loads and a `mov` a
-  step: +1–3% at both widths and every size, measured back to back. The loop takes more instructions
-  per two steps (f64 101, f32 95, was 88), all of them run checks on the extra vector loads; the
-  rest fall from 32.5 to 30.5 a step.
-- **What is left in the inner loop**: of 101 instructions per two steps (f64), 48 are `fmla` by
-  element and 40 are the vector loads' run checks (F1, gone in sysl 0.8.1). There is no `prfm`
-  ahead in either panel (F4); packing B stays a scalar gather.
+The machine was shared, so absolute figures sit a few percent under a quiet one's (OpenBLAS's f64
+gemm reaches 59–60 there); % OB, timed in the same trials, is the comparable column. Accelerate is
+SME, out of scope as the target.
+
+- **gemm: 103–124% of OpenBLAS from n = 128 at f64, 101–108% at f32**, and 96% at f32 n = 64 (was
+  87–90%). Against the 0.8.1 build of the previous code, three back-to-back rounds each: f64 faster at
+  n ≤ 256 (best of three +5–8%) and level within noise above; f32 n = 64 +3–4 points of % OB, level
+  within noise above.
+- **trsm: 103–246% of OpenBLAS at every size, was 88–112%.** The same comparison: f64 n = 64
+  13.5 → 30.0, n = 2048 49.5 → 55.2; f32 n = 64 15.4 → 42.5, n = 2048 91.5 → 114.3. A profile of the
+  old build put ~45% of trsm's time in the scalar substitution leaf; it is now solved in registers.
+- **The micro-kernel's loop on 0.8.1**: 59 instructions per two steps at both widths — 48 `fmla` by
+  element, 6 `ldp q`, two adds, the count and the branch — with no run check (it was 101 / 95 on
+  0.8.0; 0.8.1's own `@unchecked` reaching vector loads took them out before any change here). Asking
+  for `mul_add` gives the same `fmla`, now promised.
+- **Measured and kept out**: the k loop unrolled four times (no longer spills: 28.5 instructions a
+  step against 29.5, but no faster); `prfm` ahead in the A and B panels (512 / 384 and 1024 / 768
+  bytes) and on the C tile before the write-back (no faster at any size, slower at f64 n ≤ 256).
+- **Kept**: B packed by vectors — a row-major B a row at a time, a column-major B V rows at a time
+  transposed in registers (`zip1`/`zip2`); a whole column-major tile written back by vectors; trsm's
+  leaf held a column at a time in registers.
