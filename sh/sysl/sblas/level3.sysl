@@ -760,8 +760,9 @@ trsm[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: Mat
 // as trsm halves it, a lower A gives `B₂ := A₂₂ B₂ + A₂₁ B₁` and `B₁ := A₁₁ B₁`: B₂ is multiplied first
 // (recursively), then takes `alpha A₂₁ B₁` from gemm while B₁ is still the caller's, and B₁ is
 // multiplied last. An upper A is the mirror, B₁ first. So nearly all of the flops are gemm's, and only
-// the `trsm_leaf`-row diagonal blocks are multiplied directly. The right side is the left on the
-// transposes, as for trsm.
+// the `trsm_leaf`-row diagonal blocks are multiplied directly. The right side splits B's columns the
+// same way (`trmm_right`). Either side is the other on the transposes, and the one run is the one that
+// leaves gemm's C column-oriented: a column-major B on the right is not turned into a row-major one.
 
 /** `b := alpha * a * b` in place, `a` being a triangle of at most `trsm_leaf` rows. A b whose rows are
  * adjacent is multiplied a column at a time in registers (`multiply_leaf_columns`). Otherwise each row
@@ -878,10 +879,66 @@ private trmm_left[T: Real](lower: bool, unit: bool, alpha: T, a: Matrix[T], b: M
         gemm(alpha, block(a, 0, m1, m1, m2), b2.as_view(), T.one(), b1, work)
         trmm_left(lower, unit, alpha, block(a, m1, m1, m2, m2), b2, work)
 
-/** How many elements each of `GemmWork`'s two buffers needs for `trmm` on an `m` x `n` B: as for
- * `trsm`, whose recursion trmm shares — nothing up to the leaf, and gemm's buffers past it.
+/** `b := alpha * b * a` in place, `a` being a triangle of at most `trsm_leaf` columns. A b whose columns
+ * are contiguous is multiplied a column at a time: column `j` of the product is column `j` of b times
+ * the diagonal plus the other columns of b the triangle's column `j` reaches, each an axpy, formed in
+ * the order that reads only columns not yet overwritten — left to right for a lower triangle, right to
+ * left for an upper. Otherwise it is the left-hand leaf on the transposes.
  */
-trmm_work_len[T: Real](side: Side, m: usize, n: usize) -> GemmWorkLen = trsm_work_len[T](side, m, n)
+private multiply_leaf_right[T: Real](lower: bool, unit: bool, alpha: T, a: Matrix[T], b: MatrixMut[T])
+    if b.row_stride != 1
+        multiply_leaf(!lower, unit, alpha, a.t(), b.t())
+        return
+    val m = b.rows
+    val n = b.cols
+    val cs = b.col_stride
+    for s in 0..<n
+        val j = if lower then s else n - 1 - s
+        val d = if unit then alpha else alpha * a.at(j, j)
+        val col = b.data[j * cs..<j * cs + m]
+        @unchecked
+            for i in 0..<m
+                col[i] = d * col[i]
+        val (lo, hi) = if lower then (j + 1, n) else (0, j)
+        for p in lo..<hi
+            axpy_kernel[T, block_bytes / sizeof(T)](alpha * a.at(p, j), b.data[p * cs..<p * cs + m], col)
+
+/** `b := alpha * b * a` for a triangular `a` of b's columns. With b's columns halved as `trmm_left`
+ * halves its rows, a lower A gives `B₁ := B₁ A₁₁ + B₂ A₂₁` and `B₂ := B₂ A₂₂`, so B₁ is multiplied
+ * first, takes `alpha B₂ A₂₁` from gemm while B₂ is still the caller's, and B₂ is multiplied last; an
+ * upper A is the mirror. It keeps C's columns as gemm's columns, which a column-major b needs.
+ */
+private trmm_right[T: Real](lower: bool, unit: bool, alpha: T, a: Matrix[T], b: MatrixMut[T], work: GemmWork[T])
+    val n = b.cols
+    if n <= trsm_leaf
+        multiply_leaf_right(lower, unit, alpha, a, b)
+        return
+    val m = b.rows
+    val n1 = max(trsm_leaf, n / 2 / trsm_leaf * trsm_leaf)
+    val n2 = n - n1
+    val b1 = block_mut(b, 0, 0, m, n1)
+    val b2 = block_mut(b, 0, n1, m, n2)
+    if lower
+        trmm_right(lower, unit, alpha, block(a, 0, 0, n1, n1), b1, work)
+        gemm(alpha, b2.as_view(), block(a, n1, 0, n2, n1), T.one(), b1, work)
+        trmm_right(lower, unit, alpha, block(a, n1, n1, n2, n2), b2, work)
+    else
+        trmm_right(lower, unit, alpha, block(a, n1, n1, n2, n2), b2, work)
+        gemm(alpha, b1.as_view(), block(a, 0, n1, n1, n2), T.one(), b2, work)
+        trmm_right(lower, unit, alpha, block(a, 0, 0, n1, n1), b1, work)
+
+/** How many elements each of `GemmWork`'s two buffers needs for `trmm` on an `m` x `n` B: nothing when
+ * the triangle is small enough to be multiplied without gemm, and otherwise enough for gemm's updates
+ * whichever way round B is split, since which it is depends on B's strides.
+ */
+trmm_work_len[T: Real](side: Side, m: usize, n: usize) -> GemmWorkLen
+    val (k, other) = side match
+        Left -> (m, n)
+        Right -> (n, m)
+    if k <= trsm_leaf then return GemmWorkLen(0, 0)
+    val by_rows = gemm_work_len[T](k, other, k)
+    val by_cols = gemm_work_len[T](other, k, k)
+    GemmWorkLen(max(by_rows.a, by_cols.a), max(by_rows.b, by_cols.b))
 
 /** Multiplies by a triangular matrix in place: `b := alpha * a * b` on the `Left`, `b := alpha * b * a`
  * on the `Right`, BLAS's `trmm`, packing into the caller's `work` (`trmm_work_len` says how much).
@@ -908,6 +965,9 @@ trmm[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: Mat
     assert(holds(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix reaches past the end of its data")
     val lower = uplo == Uplo.Lower
     val unit = diag == Diag.Unit
+    // Each side has its own recursion, and either is the other on the transposes; the one taken is the
+    // one that keeps gemm's C with its rows closer together than its columns.
+    val columns = b.row_stride <= b.col_stride
     side match
-        Left -> trmm_left(lower, unit, alpha, a, b, work)
-        Right -> trmm_left(!lower, unit, alpha, a.t(), b.t(), work)
+        Left -> if columns then trmm_left(lower, unit, alpha, a, b, work) else trmm_right(!lower, unit, alpha, a.t(), b.t(), work)
+        Right -> if columns then trmm_right(lower, unit, alpha, a, b, work) else trmm_left(!lower, unit, alpha, a.t(), b.t(), work)

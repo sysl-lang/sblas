@@ -14,8 +14,8 @@ faer (Rust) and Octavian.jl.
 | level | routines | state |
 |---|---|---|
 | 1 | axpy, dot, nrm2, asum, scal, copy, swap, iamax, rot, rotg | done, f32 and f64 |
-| 2 | gemv, ger | done, f32 and f64 |
-| 3 | gemm (packing, cache blocking, threads), trsm | gemm: the blocked structure, f32 and f64, and `gemm_par` on the caller's workers, bitwise equal to it; trsm: recursive on gemm, f32 and f64, every side, triangle and diagonal |
+| 2 | gemv, ger, symv, syr2 | done, f32 and f64 |
+| 3 | gemm (packing, cache blocking, threads), trsm, trmm, syrk | gemm: the blocked structure, f32 and f64, and `gemm_par` on the caller's workers, bitwise equal to it; trsm and trmm: recursive on gemm, f32 and f64, every side, triangle and diagonal; syrk: gemm's five loops writing one triangle |
 
 Complex element types, `rotm`/`rotmg`, and the banded and packed Level 2 forms are not scheduled.
 
@@ -72,6 +72,15 @@ is dot products, four rows per pass sharing each load of `x`, at 64 bytes of lan
 accumulators and `x` fit the register file. Both take the vector the matrix sweeps past a 16 KB panel
 at a time, so it stays in L1. `ger` is column axpys of `x`, or of `y` over `a.t()` when the rows are
 the contiguous side. A matrix with neither stride 1, or a vector off stride 1, takes a walk.
+
+`symv` reads each element of its triangle once, for two uses: column `j` off the diagonal is added
+into `y` times `alpha x[j]` and dotted with `x` for `y[j]` (the row of the other triangle it mirrors),
+four columns per pass so that `x` and `y` are loaded, and `y` stored, once per four; the four by four
+diagonal blocks and the up to three columns left over (the last of a lower triangle, the first of an
+upper one) take the reference's loop. `syr2` is two axpys into each column's part of the triangle in
+one pass. A triangle whose rows are contiguous is the other triangle of the transpose, whose columns
+are — a symmetric matrix is its own transpose, and the `syr2` update is symmetric — so both run on
+`a.t()` with the triangle flipped there.
 
 ## Element types and tile sizes
 
@@ -186,6 +195,42 @@ gemm's shared dimension as deep as the problem allows (an n = 2048 solve's first
 gemm), so nearly all of a large solve's flops are gemm's; only the 16-row diagonal blocks are done by
 substitution, with the inner loop along whichever of B's dimensions is contiguous. `Right` is `Left`
 on the transposes (`X A = B` is `Aᵀ Xᵀ = Bᵀ`, the triangle flipped), which the views make free.
+
+**`trmm` takes trsm's arguments** and multiplies in place: `b := alpha op(A) b` on the left,
+`b := alpha b op(A)` on the right, with the transpose again a view (`Uplo.Lower, u.t()` for CBLAS's
+`uplo = U, trans = T`). Its recursion is trsm's run the other way: for a lower A on the left, B₂ is
+multiplied first, then takes `alpha A₂₁ B₁` from gemm while B₁ is still the caller's, and B₁ is
+multiplied last; an upper A is the mirror. The right side splits B's columns the same way. Either
+side is the other on the transposes, and the one run is the one that leaves gemm's C with its rows
+closer together than its columns — a column-major B on the right stays column-major, where turning
+it would put every write-back on gemm's element-at-a-time path. The 16-row diagonal blocks are
+multiplied directly: a column-major B a column at a time in registers, against the triangle packed
+times alpha with zeros elsewhere, the lanes of each column's own vector done one at a time so an
+infinity in B reaches exactly the rows the reference product sends it to; any other B row by row (or
+column by column on the right) in the order that reads only what is not yet overwritten.
+`trmm_work_len(side, m, n)` covers gemm's updates for B split either way. `alpha = 0` sets B to zero
+reading neither B nor A.
+
+```sysl
+trmm(Side.Right, Uplo.Upper, Diag.NonUnit, 1.0, t, v, work)    // v := v t, QR's block reflector
+syrk(Uplo.Lower, -1.0, a21, 1.0, a22, work)                    // a22 -= a21 a21ᵀ, Cholesky's update
+symv(Uplo.Lower, 1.0, a, x, 0.0, y)                            // y := a x, a symmetric
+syr2(Uplo.Lower, -1.0, v, w, a)                                // a -= v wᵀ + w vᵀ
+```
+
+**`syrk` is gemm's five loops writing one triangle.** `c := alpha a aᵀ + beta c` (`a.t()` for
+`trans = 'T'`) runs `gemm_blocked` on `a` and `a.t()` with the triangle a compile-time parameter
+(`tri_all` for gemm, where every check folds away): a block of A whose rows lie wholly outside the
+triangle against the current panel of B is not packed, a tile wholly outside it is not multiplied,
+and a tile the diagonal crosses is computed whole and written back only inside it. So syrk does half
+of gemm's flops at gemm's speed, and the other triangle of C is neither read nor written — bit for
+bit as it was. `syrk_work_len(n, k)` is gemm's for an `n` x `n` C. `beta = 0` writes the triangle
+without reading it; `alpha = 0` or `k = 0` only scales the triangle.
+
+`symv` and `syr2` read (write) only the `uplo` triangle, diagonal included; the other triangle may hold
+anything. They keep Level 2's quick returns: an empty matrix leaves `y` alone, `beta = 0` writes `y`
+without reading it, `alpha = 0` reads neither the matrix nor `x` (and `syr2` returns at once). A
+matrix that is not square, or vectors of the wrong length, trap.
 
 **A C-ABI export layer is possible and not decided** (see the questions). It would be `@export`
 definitions named `cblas_dgemm` and so on, converting CBLAS's `(order, trans, n, ptr, inc)` arguments

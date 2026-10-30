@@ -277,8 +277,8 @@ private check_trmm_all[T: Real](k: usize, other: usize, seed: u64)
 private sweep_trmm[T: Real](seed: u64)
     val (mr, nr, kc, mc, _) = gemm_blocking[T]()
     val leaf = trsm_leaf
-    for (k, other) in [(1, 1), (2, 3), (leaf - 1, nr + 1), (leaf, 1), (leaf + 1, nr - 1), (leaf + mr + 1, nr + 1), (2 * leaf + nr, 2 * nr + 1), (mc + leaf + 3, 2)]
-        check_trmm_all[T](k, other, seed + u64(k) * 64)
+    for (k, other) in [(1, 1), (2, 3), (leaf - 1, nr + 1), (leaf, 1), (leaf + 1, nr - 1), (leaf + mr + 1, nr + 1), (2 * leaf + nr, 2 * nr + 1), (mc + leaf + 3, 2), (leaf + 1, mc + 5)]
+        check_trmm_all[T](k, other, seed + u64(k * 7 + other) * 64)
     // KC: the top split's gemm runs deeper than one slice, and the lower half is taller than MC.
     for left in [true, false]
         for lower in [true, false]
@@ -372,13 +372,18 @@ trmm_empty()
     trmm(Side.Right, Uplo.Upper, Diag.NonUnit, 0.0, matrix(a.view(), 5, 5, 5), matrix_mut(b[..], 0, 5, 1), GemmWork(w[..], w[..]))
     assert(b[0].is_nan() && b[1] == 1 && b[4] == 4, "an empty trmm touched B")
 
-@test("trmm_work_len is trsm's: nothing up to the leaf, gemm's buffers past it, by the triangle's side")
+@test("trmm_work_len needs nothing up to the leaf, and past it gemm's buffers for B split either way")
 trmm_work_lens()
-    for side in [Side.Left, Side.Right]
-        for (m, n) in [(trsm_leaf, 1000), (trsm_leaf + 1, 9), (9, trsm_leaf + 1), (1000, trsm_leaf)]
-            val t = trmm_work_len[f64](side, m, n)
-            val s = trsm_work_len[f64](side, m, n)
-            assert(t.a == s.a && t.b == s.b)
+    val small = trmm_work_len[f64](Side.Left, trsm_leaf, 1000)
+    assert(small.a == 0 && small.b == 0)
+    val none = trmm_work_len[f64](Side.Right, 1000, trsm_leaf)
+    assert(none.a == 0 && none.b == 0)
+    val k = trsm_leaf + 1
+    val rows = gemm_work_len[f64](k, 1000, k)
+    val cols = gemm_work_len[f64](1000, k, k)
+    for t in [trmm_work_len[f64](Side.Left, k, 1000), trmm_work_len[f64](Side.Right, 1000, k)]
+        assert(t.a == (if rows.a > cols.a then rows.a else cols.a) && t.b == (if rows.b > cols.b then rows.b else cols.b))
+        assert(t.a >= rows.a && t.a >= cols.a && t.b >= rows.b && t.b >= cols.b)
 
 @test("trmm traps on an A that is not square", should_trap)
 trmm_not_square()
