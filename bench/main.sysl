@@ -1,5 +1,5 @@
 import sh.sysl.blas.*
-import sh.sysl.cblas.{Oracle, Lib, libs}
+import sh.sysl.cblas.{Oracle, Lib, libs, no_trans}
 import sysl.slices.{as_mut_ptr, sort_by}
 import sysl.time.monotonic
 import sysl.hint.black_box
@@ -124,7 +124,57 @@ private bench_width[T: Oracle](name: string)
             val ob = median(rates[2][..])
             print(f"| ${name} | ${op.name()} | ${places[k]} ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
 
-main()
+// --- gemm ------------------------------------------------------------------------------------------
+
+/** Square gemm sizes: L1-resident up to well past every cache. */
+private val gemm_sizes: [6]usize = [64, 128, 256, 512, 1024, 2048]
+
+/** About this many flops per trial, so a small size repeats and a large one runs once. */
+private const gemm_work: f64 = 4e9
+
+/** One `c := a * b + c` of `n` x `n` column-major matrices by implementation `who`, 0 being sysl;
+ * sysl packs into `pa` and `pb`, allocated once outside the timing as the caller-supplied form allows.
+ */
+private gemm_once[T: Oracle](who: usize, n: usize, a: []T, b: []T, c: []T, pa: []T, pb: []T)
+    val one = T.one()
+    if who == 0
+        gemm(one, col_major(a, n, n, n), col_major(b, n, n, n), one, col_major_mut(c, n, n, n), GemmWork(pa, pb))
+        return
+    val nn = i32(n)
+    T.o_gemm(libs[who - 1], no_trans, no_trans, nn, nn, nn, one, as_mut_ptr(a), nn, as_mut_ptr(b), nn, one, as_mut_ptr(c), nn)
+
+private bench_gemm[T: Oracle](name: string)
+    for n in gemm_sizes
+        val a = fill[T](n * n)
+        val b = fill[T](n * n)
+        val c = fill[T](n * n)
+        val len = gemm_work_len[T](n, n, n)
+        val pa = fill[T](len.a)
+        val pb = fill[T](len.b)
+        val flops = 2.0 * f64(n) * f64(n) * f64(n)
+        val reps = int(gemm_work / flops) + 1
+        var rates: [3][trials]f64
+        for t in 0..<trials
+            for who in 0..<3
+                val t0 = monotonic().us
+                for _ in 0..<reps
+                    gemm_once(who, n, black_box(a.view()), black_box(b.view()), black_box(c.view()), pa.view(), pb.view())
+                val dt = f64(monotonic().us - t0) * 1e-6
+                rates[who][t] = flops * f64(reps) / dt * 1e-9
+        val ours = median(rates[0][..])
+        val acc = median(rates[1][..])
+        val ob = median(rates[2][..])
+        print(f"| ${name} | gemm | ${n} | ${ours}%.1f | ${acc}%.1f | ${ob}%.1f | ${100.0 * ours / acc}%.0f | ${100.0 * ours / ob}%.0f |")
+
+/** With no argument, every Level 1 routine; with `gemm`, gemm alone. */
+main(args: []string)
+    if args.len > 1 && args[1] == "gemm"
+        print(f"GFLOPS, square column-major C += A * B, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
+        print("| type | routine | n | sysl | Accelerate | OpenBLAS | % Acc | % OB |")
+        print("|---|---|---|---:|---:|---:|---:|---:|")
+        bench_gemm[f64]("f64")
+        bench_gemm[f32]("f32")
+        return
     print(f"GB/s, median of ${trials} interleaved trials: sysl, Accelerate, OpenBLAS, and sysl as % of each")
     print("| type | routine | size | sysl | Accelerate | OpenBLAS | % Acc | % OB |")
     print("|---|---|---|---:|---:|---:|---:|---:|")

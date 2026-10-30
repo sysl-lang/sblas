@@ -1,0 +1,236 @@
+module sh.sysl.blas
+@no_alloc
+
+import sysl.math.min
+
+// Level 3: gemm, laid out as BLIS lays it out.
+//
+// Five loops partition the work. The outermost walks C in column blocks NC wide; inside it the shared
+// dimension is cut into slices KC deep, and each KC x NC block of op(B) is packed into panels NR
+// columns wide; inside that, op(A) is cut into blocks MC tall, each packed into panels MR rows tall.
+// The two innermost loops walk the packed panels a tile at a time and hand each pair to the
+// micro-kernel, which keeps an MR x NR block of C in registers and does KC rank-1 updates on it.
+//
+// Packing is where strides, transposes and fringes are resolved: a panel is contiguous, in exactly the
+// order the micro-kernel reads it, and a fringe panel is padded with zeros to a full tile. So the
+// micro-kernel only ever sees unit-stride panels and a whole tile; its result goes to a small scratch
+// tile, and the write-back adds the part of the tile that lies inside C.
+//
+// Everything below the routine is generic over the element type and the tile; the routine names the
+// tile per target. The packing buffers are the caller's (`GemmWork`), so nothing here allocates;
+// `sh.sysl.blas.heap.gemm_alloc` is the form that makes them.
+
+/** Bytes in one vector register: a NEON or SSE `q` register. */
+private const vector_bytes: usize = 16
+
+// The tile, per target. MR is `tile_vectors` vectors of A's column, NR is `tile_cols` broadcasts of
+// B's row, and the accumulators take `tile_vectors * tile_cols` registers. KC and MC are in bytes so
+// that both widths keep the same panel footprint: an f32 panel is twice as deep and twice as tall.
+#if aarch64
+// 32 vector registers: 24 accumulators, 4 for A's column, the rest for B's broadcasts. f64 8x6 and
+// f32 16x6 — the shape of BLIS's armv8a kernels (dgemm 6x8, accumulating along C's rows) turned to
+// accumulate along C's columns, which are contiguous here.
+private const tile_vectors: usize = 4
+private const tile_cols: usize = 6
+#else
+// 16 vector registers: 8 accumulators.
+private const tile_vectors: usize = 2
+private const tile_cols: usize = 4
+#endif
+
+/** KC: the depth of a packed slice. 256 f64 or 512 f32, so an NR-wide panel of B (12 KB f64) sits in
+ * L1 beside the A panel being streamed.
+ */
+private const kc_bytes: usize = 2048
+
+/** MC: the height of a packed block of A, 120 f64 or 240 f32 — a multiple of MR at both widths. With
+ * KC it makes a 240 KB block of A, resident in L2.
+ */
+private const mc_bytes: usize = 960
+
+/** NC: the width of a packed block of B, in elements (a multiple of NR on every target). */
+private const nc: usize = 3072
+
+/** The packing buffers gemm works in: `a` holds one packed block of op(A), `b` one of op(B). Their
+ * sizes for a given problem are `gemm_work_len`'s answer, and anything longer is fine.
+ */
+struct GemmWork[T]
+    a: []T
+    b: []T
+
+/** How many elements each of `GemmWork`'s two buffers needs for an `m` x `n` result with shared
+ * dimension `k`. A zero is a buffer gemm does not touch.
+ */
+struct GemmWorkLen
+    a: usize
+    b: usize
+
+private round_up(x: usize, to: usize) -> usize = (x + to - 1) / to * to
+
+private work_len[T, const MR: usize, const NR: usize, const KC: usize, const MC: usize, const NC: usize](m: usize, n: usize, k: usize) -> GemmWorkLen
+    if m == 0 || n == 0 || k == 0 then return GemmWorkLen(0, 0)
+    val kc = min(k, KC)
+    GemmWorkLen(round_up(min(m, MC), MR) * kc, kc * round_up(min(n, NC), NR))
+
+/** The blocking gemm uses at this width on this target, as (MR, NR, KC, MC, NC): what a test must
+ * cross to reach every fringe.
+ */
+private[blas] gemm_blocking[T: Real]() -> (usize, usize, usize, usize, usize) = (vector_bytes / sizeof(T) * tile_vectors, tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc)
+
+/** The buffer sizes gemm needs for `c` (`m` x `n`) := `alpha * a * b + beta * c`, `a` being `m` x `k`. */
+gemm_work_len[T: Real](m: usize, n: usize, k: usize) -> GemmWorkLen
+    work_len[T, vector_bytes / sizeof(T) * tile_vectors, tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](m, n, k)
+
+// --- Packing ---------------------------------------------------------------------------------------
+
+/** Packs rows `i0 ..< i0 + mc` and columns `p0 ..< p0 + kc` of `a` into MR-row panels: panel `r`
+ * starts at `r * MR * kc`, and holds column `p` of its rows at `p * MR`. A fringe panel's missing
+ * rows are zeros.
+ */
+private pack_a[T: Real, const MR: usize](a: Matrix[T], i0: usize, mc: usize, p0: usize, kc: usize, out: []T)
+    assert(round_up(mc, MR) * kc <= out.len, "gemm's A packing buffer is too short for the block")
+    val rs = a.row_stride
+    val cs = a.col_stride
+    var at: usize = 0
+    var ir: usize = 0
+    @unchecked
+        while ir < mc
+            val mr = min(mc - ir, MR)
+            val base = (i0 + ir) * rs + p0 * cs
+            for p in 0..<kc
+                val col = base + p * cs
+                for i in 0..<mr
+                    out[at + i] = a.data[col + i * rs]
+                for i in mr..<MR
+                    out[at + i] = T.zero()
+                at += MR
+            ir += MR
+
+/** Packs rows `p0 ..< p0 + kc` and columns `j0 ..< j0 + nc` of `b` into NR-column panels: panel `r`
+ * starts at `r * NR * kc`, and holds row `p` of its columns at `p * NR`. A fringe panel's missing
+ * columns are zeros.
+ */
+private pack_b[T: Real, const NR: usize](b: Matrix[T], p0: usize, kc: usize, j0: usize, nc: usize, out: []T)
+    assert(round_up(nc, NR) * kc <= out.len, "gemm's B packing buffer is too short for the block")
+    val rs = b.row_stride
+    val cs = b.col_stride
+    var at: usize = 0
+    var jr: usize = 0
+    @unchecked
+        while jr < nc
+            val nr = min(nc - jr, NR)
+            val base = p0 * rs + (j0 + jr) * cs
+            for p in 0..<kc
+                val row = base + p * rs
+                for j in 0..<nr
+                    out[at + j] = b.data[row + j * cs]
+                for j in nr..<NR
+                    out[at + j] = T.zero()
+                at += NR
+            jr += NR
+
+// --- The micro-kernel ------------------------------------------------------------------------------
+
+/** `tile := A~ * B~` for one MR x NR tile, MR being `MV` vectors of `V` lanes: `kc` rank-1 updates, each
+ * a column of the A panel (`MV` loads) times each of NR elements of the B panel's row (a broadcast
+ * and `MV` fused multiply-adds). The tile is written column-major, MR elements to a column.
+ */
+private micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usize, ap: []const T, bp: []const T, tile: []T)
+    var acc: [NR][MV]<V>T
+    var a: [MV]<V>T
+    @unchecked
+        for p in 0..<kc
+            val ao = p * V * MV
+            for v in 0..<MV
+                a[v] = ap.load(ao + v * V)
+            val bo = p * NR
+            for j in 0..<NR
+                val b = bp[bo + j]
+                for v in 0..<MV
+                    acc[j][v] = a[v] * b + acc[j][v]
+    for j in 0..<NR
+        for v in 0..<MV
+            tile.store((j * MV + v) * V, acc[j][v])
+
+/** Adds the `mr` x `nr` corner of `tile` into C at (`i0`, `j0`): `c := alpha * tile + beta * c`, where
+ * a `beta` of zero writes without reading C, so a NaN there does not survive.
+ */
+private write_back[T: Real, const MR: usize](c: MatrixMut[T], i0: usize, j0: usize, mr: usize, nr: usize, tile: []const T, alpha: T, beta: T)
+    val rs = c.row_stride
+    val cs = c.col_stride
+    @unchecked
+        for j in 0..<nr
+            val col = i0 * rs + (j0 + j) * cs
+            if beta == T.zero()
+                for i in 0..<mr
+                    c.data[col + i * rs] = alpha * tile[j * MR + i]
+            else
+                for i in 0..<mr
+                    val at = col + i * rs
+                    c.data[at] = alpha * tile[j * MR + i] + beta * c.data[at]
+
+/** `c := beta * c`, reading nothing when `beta` is zero and touching nothing when it is one. */
+private scale_c[T: Real](c: MatrixMut[T], beta: T)
+    if beta == T.one() then return
+    @unchecked
+        for j in 0..<c.cols
+            for i in 0..<c.rows
+                val at = i * c.row_stride + j * c.col_stride
+                c.data[at] = if beta == T.zero() then T.zero() else beta * c.data[at]
+
+// --- The five loops --------------------------------------------------------------------------------
+
+/** The five loops at one tile: MR = `V * MV`, and `TILE` = MR * NR is passed on its own, since an
+ * array's length may name a value parameter but not compute with one.
+ */
+private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, const TILE: usize, const KC: usize, const MC: usize, const NC: usize](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+    val m = c.rows
+    val n = c.cols
+    val k = a.cols
+    val need = work_len[T, V * MV, NR, KC, MC, NC](m, n, k)
+    assert(work.a.len >= need.a && work.b.len >= need.b, "gemm's packing buffers are shorter than gemm_work_len says")
+    var tile: [TILE]T
+    var jc: usize = 0
+    while jc < n
+        val ncb = min(n - jc, NC)
+        var pc: usize = 0
+        while pc < k
+            val kc = min(k - pc, KC)
+            val beta_here = if pc == 0 then beta else T.one()
+            pack_b[T, NR](b, pc, kc, jc, ncb, work.b)
+            var ic: usize = 0
+            while ic < m
+                val mcb = min(m - ic, MC)
+                pack_a[T, V * MV](a, ic, mcb, pc, kc, work.a)
+                var jr: usize = 0
+                while jr < ncb
+                    val bp = work.b[jr * kc..<(jr + NR) * kc]
+                    var ir: usize = 0
+                    while ir < mcb
+                        micro[T, V, MV, NR](kc, work.a[ir * kc..<(ir + V * MV) * kc], bp, tile[..])
+                        write_back[T, V * MV](c, ic + ir, jc + jr, min(mcb - ir, V * MV), min(ncb - jr, NR), tile[..], alpha, beta_here)
+                        ir += V * MV
+                    jr += NR
+                ic += MC
+            pc += KC
+        jc += NC
+
+// --- The routine -----------------------------------------------------------------------------------
+
+/** `c := alpha * a * b + beta * c`, packing into the caller's `work` (`gemm_work_len` says how much).
+ *
+ * `a` is `m` x `k`, `b` is `k` x `n` and `c` is `m` x `n`; a transpose is passed as `a.t()`. As in the
+ * reference BLAS, a `beta` of zero sets C without reading it, so a NaN or an infinity there does not
+ * survive, and an `alpha` of zero or an empty `k` reads neither `a` nor `b`. Dimensions that disagree
+ * trap, and so does a view built by hand that reaches past its data.
+ */
+gemm[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T], work: GemmWork[T])
+    assert(a.rows == c.rows && b.cols == c.cols && a.cols == b.rows, "gemm's matrices do not agree in shape")
+    assert(spans(c.data.len, c.rows, c.cols, c.row_stride, c.col_stride), "a matrix view reaches past the end of its data")
+    if c.rows == 0 || c.cols == 0 then return
+    if alpha == T.zero() || a.cols == 0
+        scale_c(c, beta)
+        return
+    assert(spans(a.data.len, a.rows, a.cols, a.row_stride, a.col_stride), "a matrix view reaches past the end of its data")
+    assert(spans(b.data.len, b.rows, b.cols, b.row_stride, b.col_stride), "a matrix view reaches past the end of its data")
+    gemm_blocked[T, vector_bytes / sizeof(T), tile_vectors, tile_cols, vector_bytes / sizeof(T) * tile_vectors * tile_cols, kc_bytes / sizeof(T), mc_bytes / sizeof(T), nc](alpha, a, b, beta, c, work)

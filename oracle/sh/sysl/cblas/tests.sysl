@@ -2,6 +2,8 @@ module sh.sysl.cblas
 @tests
 
 import sh.sysl.blas.*
+import sh.sysl.blas.heap.gemm_alloc
+import sysl.buf.{Buf, buf_filled}
 import sysl.slices.as_mut_ptr
 
 // Every routine of sh.sysl.blas against the platform's CBLAS on generated data, at both widths, every
@@ -147,6 +149,72 @@ private check_iamax_ties[T: Oracle](lib: Lib)
         val n = (6 - 1) / usize(inc.abs()) + 1
         val got = iamax(strided(xs[..], n, inc))
         assert(got == Some(usize(T.o_iamax(lib, i32(n), as_mut_ptr(xs[..]), i32(inc)))), "iamax tie")
+
+// --- gemm ------------------------------------------------------------------------------------------
+
+/** Shapes (m, n, k): each dimension empty, one, under a tile, over a tile, and over a KC slice. */
+private val gemm_shapes: [10](usize, usize, usize) = [(0, 3, 4), (3, 0, 4), (3, 4, 0), (1, 1, 1), (7, 5, 3), (9, 7, 2), (17, 13, 9), (33, 20, 70), (40, 9, 600), (130, 14, 31)]
+
+/** gemm through both implementations on equal copies of C, every transpose of A and B, leading
+ * dimensions two past the rows they hold, and alpha and beta at zero, one and elsewhere. Where beta is
+ * zero C starts as NaN, which must not survive; the padding rows of C must come back as they went in.
+ */
+private check_gemm[T: Oracle](lib: Lib, seed: u64)
+    var s = Stream(seed)
+    val alphas: [3]f64 = [0, 1, -1.375]
+    val betas: [3]f64 = [0, 1, 0.625]
+    for (m, n, k) in gemm_shapes
+        for ta in [false, true]
+            for tb in [false, true]
+                // The stored A is m x k, or k x m when it is transposed; likewise B.
+                val (ar, ac) = if ta then (k, m) else (m, k)
+                val (br, bc) = if tb then (n, k) else (k, n)
+                val lda = ar + 2
+                val ldb = br + 2
+                val ldc = m + 2
+                val av: Buf[T] = buf_filled(lda * ac, T.zero())
+                val bv: Buf[T] = buf_filled(ldb * bc, T.zero())
+                fill(av.view(), &s, 1)
+                fill(bv.view(), &s, 1)
+                val a = if ta then col_major(av.view(), ar, ac, lda).t() else col_major(av.view(), ar, ac, lda)
+                val b = if tb then col_major(bv.view(), br, bc, ldb).t() else col_major(bv.view(), br, bc, ldb)
+                for alpha_u in alphas
+                    for beta_u in betas
+                        val alpha = T.from_unit(alpha_u)
+                        val beta = T.from_unit(beta_u)
+                        val ours: Buf[T] = buf_filled(ldc * n, T.zero())
+                        val theirs: Buf[T] = buf_filled(ldc * n, T.zero())
+                        fill(ours.view(), &s, 1)
+                        for j in 0..<n
+                            for i in 0..<m
+                                if beta == T.zero() then ours[i + j * ldc] = T.nan()
+                        for i in 0..<ours.len()
+                            theirs[i] = ours[i]
+                        val before: Buf[T] = buf_filled(ours.len(), T.zero())
+                        for i in 0..<ours.len()
+                            before[i] = ours[i]
+                        T.o_gemm(lib, if ta then trans else no_trans, if tb then trans else no_trans, i32(m), i32(n), i32(k), alpha, as_mut_ptr(av.view()), i32(lda), as_mut_ptr(bv.view()), i32(ldb), beta, as_mut_ptr(theirs.view()), i32(ldc))
+                        gemm_alloc(alpha, a, b, beta, col_major_mut(ours.view(), m, n, ldc))
+                        for j in 0..<n
+                            for i in 0..<m
+                                var bound = if beta == T.zero() then T.zero() else (beta * before[i + j * ldc]).abs()
+                                for p in 0..<k
+                                    bound = bound + (alpha * a.at(i, p) * b.at(p, j)).abs()
+                                val got = ours[i + j * ldc]
+                                assert(!got.is_nan(), "gemm left a NaN")
+                                assert(near(got, theirs[i + j * ldc], bound, T.from_unit(f64(2 * k + 4))), "gemm")
+                            for i in m..<ldc
+                                assert(ours[i + j * ldc] == before[i + j * ldc], "gemm wrote C's padding")
+
+@test("gemm agrees with Accelerate and OpenBLAS, every transpose, alpha and beta, f64")
+oracle_gemm_f64()
+    for lib in libs
+        check_gemm[f64](lib, 5)
+
+@test("gemm agrees with Accelerate and OpenBLAS, every transpose, alpha and beta, f32")
+oracle_gemm_f32()
+    for lib in libs
+        check_gemm[f32](lib, 6)
 
 @test("dot, nrm2, asum and iamax agree with Accelerate and OpenBLAS, f64")
 oracle_reductions_f64()

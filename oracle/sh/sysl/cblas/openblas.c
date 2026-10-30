@@ -175,3 +175,21 @@ int sysl_ob_isamax(int n, const float *x, int incx) {
     RESOLVE(imax_s, "cblas_isamax");
     return (int)fn(n, x, incx);
 }
+
+/* CBLAS's order and transpose enums are `int`-sized, passed here as their values (102, 111, 112). */
+typedef void (*gemm_d)(int, int, int, int, int, int, double, const double *, int, const double *, int,
+                       double, double *, int);
+typedef void (*gemm_s)(int, int, int, int, int, int, float, const float *, int, const float *, int,
+                       float, float *, int);
+
+void sysl_ob_dgemm(int order, int transa, int transb, int m, int n, int k, double alpha,
+                   const double *a, int lda, const double *b, int ldb, double beta, double *c, int ldc) {
+    RESOLVE(gemm_d, "cblas_dgemm");
+    fn(order, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
+}
+
+void sysl_ob_sgemm(int order, int transa, int transb, int m, int n, int k, float alpha,
+                   const float *a, int lda, const float *b, int ldb, float beta, float *c, int ldc) {
+    RESOLVE(gemm_s, "cblas_sgemm");
+    fn(order, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
+}

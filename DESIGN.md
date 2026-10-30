@@ -15,7 +15,7 @@ faer (Rust) and Octavian.jl.
 |---|---|---|
 | 1 | axpy, dot, nrm2, asum, scal, copy, swap, iamax, rot, rotg | done, f32 and f64 |
 | 2 | gemv, ger | next |
-| 3 | gemm (packing, cache blocking, threads), then trsm | after Level 2 |
+| 3 | gemm (packing, cache blocking, threads), then trsm | gemm: the blocked structure, f32 and f64, single-threaded, not yet tuned |
 
 Complex element types, `rotm`/`rotmg`, and the banded and packed Level 2 forms are not scheduled.
 
@@ -72,12 +72,31 @@ for `iamax`, the complex `rotg`), with the real routines unchanged. Level 1 comp
 doubles the routine list (`dotu`/`dotc`, `scnrm2`, `icamax`, `crotg`, the real-scalar `csscal`) — so
 it waits for the decision below.
 
-**Tile sizes are const generics**: `gemm_kernel[T, const MR: usize, const NR: usize, const KC: usize,
-const MC: usize, const NC: usize]`. A function's value parameter cannot carry a default (probed: "'W'
-is a value parameter of the function …, so '= …' has nothing to stand in for"), so the public `gemm`
-names the instantiation itself, per target, through `#if`. The tile is then a compile-time constant
-everywhere: loop bounds fold, the accumulator array is `[MR][NR]` of registers, and packing loops
-unroll.
+**Tile sizes are const generics**: `gemm_blocked[T, const V, const MV, const NR, const TILE, const KC,
+const MC, const NC]`, MR being `MV` vectors of `V` lanes. A function's value parameter cannot carry a
+default (probed: "'W' is a value parameter of the function …, so '= …' has nothing to stand in for"),
+so the public `gemm` names the instantiation itself, per target, through `#if`. The tile is then a
+compile-time constant everywhere: loop bounds fold, the accumulator array `[NR][MV]<V>T` lives in
+registers (24 of them on AArch64, checked in the emitted loop), and packing loops unroll. `TILE` (MR x
+NR, the scratch tile's length) is passed on its own because an array's length may name a value
+parameter but not compute with one — type-level arithmetic, which the reference states is a separate
+feature; a body computes with them freely.
+
+**The starting blocking** (`level3.sysl`), to be swept when the kernel is tuned:
+
+| | AArch64 (32 q registers) | anything else (16) |
+|---|---|---|
+| MR x NR, f64 | 8 x 6 (4 vectors x 6 broadcasts, 24 accumulators) | 4 x 4 |
+| MR x NR, f32 | 16 x 6 | 8 x 4 |
+| KC | 2 KB of depth: 256 f64, 512 f32 | same |
+| MC | 960 bytes of height: 120 f64, 240 f32 | same |
+| NC | 3072 | same |
+
+The 8x6 shape is BLIS's armv8a dgemm 6x8 turned to accumulate along C's columns (contiguous here,
+rows there); OpenBLAS's ARMv8/VORTEX kernels are 8x4 (f64) and 16x4 (f32), which use fewer
+accumulators than the register file holds. KC keeps an NR-wide B panel (12 KB) in L1 beside the A
+panel being streamed; MC x KC of A (240 KB) sits in L2; KC x NC of B (6 MB) in the last level. KC and
+MC are written in bytes so both widths have the same footprint.
 
 ## The API
 
@@ -97,10 +116,24 @@ val k = iamax(view(xs[..]))   // Option[usize], 0-based; None when empty
 Two views of different lengths trap: BLAS passes one `n`, and two views that disagree about it are a
 bug in the caller.
 
-**A matrix will be a view with two strides**, `Matrix[T] { data, rows, cols, row_stride, col_stride }`
+**A matrix is a view with two strides**, `Matrix[T] { data, rows, cols, row_stride, col_stride }`
 and `MatrixMut[T]`, as BLIS has it: row-major, column-major and any general stride are the same type,
-and `a.t()` is a view that swaps the two strides rather than a `trans` flag. `gemm(alpha, a, b, beta,
-c)` then needs no `transa`/`transb`/`lda` parameters; packing absorbs whatever strides it is given.
+and `a.t()` is a view that swaps the two strides rather than a `trans` flag. `col_major(data, rows,
+cols, ld)` is BLAS's layout (it traps on `ld < rows`), `matrix(…)` takes any two strides, and both
+check that the slice holds every element. `gemm` then needs no `transa`/`transb`/`lda` parameters;
+packing absorbs whatever strides it is given.
+
+```sysl
+val len = gemm_work_len[f64](m, n, k)          // GemmWorkLen { a, b }: elements per packing buffer
+gemm(alpha, a, b.t(), beta, c, GemmWork(pa, pb))   // the core: caller's buffers, @no_alloc
+gemm_alloc(alpha, a, b.t(), beta, c)           // sh.sysl.blas.heap: allocates them per call
+```
+
+`gemm` follows the reference where it is specific: `beta = 0` writes C without reading it (a NaN
+there does not survive), `alpha = 0` or `k = 0` reads neither A nor B and only scales C, and
+`beta = 1` with `alpha = 0` touches nothing. Shapes that disagree, and buffers shorter than
+`gemm_work_len` says, trap. The allocating form lives in its own module because `@no_alloc` in a
+file's header binds the whole module.
 
 **A C-ABI export layer is possible and not decided** (see the questions). It would be `@export`
 definitions named `cblas_dgemm` and so on, converting CBLAS's `(order, trans, n, ptr, inc)` arguments
@@ -210,14 +243,13 @@ least 80% of its DGEMM), with Accelerate reported alongside.
    parameter error). Keep the view semantics?
 3. **Mismatched lengths**: trap (now), use the shorter, or return a `Result`?
 4. **`iamax`'s result**: `Option[usize]`, 0-based (now), or CBLAS's plain index with 0 for empty?
-5. **Level 3 workspace**: caller-supplied packing buffers (keeps the package `@no_alloc` and usable on
-   a board), or allocated per call, or both?
+5. **Level 3 workspace** — *decided*: caller-supplied packing buffers in the core (`GemmWork`, sized
+   by `gemm_work_len`; the package stays `@no_alloc`), plus `sh.sysl.blas.heap.gemm_alloc`.
 6. **Complex**: on `sysl.math.complex.Complex[F]`, and at which level does it start?
 7. **Threads**: whose pool — `sysl.threads`, a package, or the caller's?
 8. **Vector `mul_add` and `abs`**: add them to `<N>T` before the micro-kernels are written?
 9. **The `@tests` impl rule**: allow an `impl` of a test-file trait for any type?
-10. **Tile sizes**: fixed per target at compile time (now), or chosen at run time from the cache sizes
-    the OS reports?
-11. **The speed target on Apple silicon**: OpenBLAS (NEON) as proposed, or Accelerate — which would
-    mean SME, and so streaming-mode support in sysl?
+10. **Tile sizes** — *decided*: fixed per target at compile time.
+11. **The speed target on Apple silicon** — *decided*: OpenBLAS's NEON path. Accelerate's SME is an
+    out-of-scope gap (it would need streaming-mode support in sysl).
 12. **The oracle on Linux**: `libcblas` is not a standard name there; link OpenBLAS directly?

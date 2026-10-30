@@ -1,0 +1,66 @@
+module sh.sysl.blas
+@no_alloc
+
+// A matrix is a view with two strides, as BLIS has it: element (i, j) is `data[i * row_stride + j *
+// col_stride]`. Column-major storage with a leading dimension `ld` is `row_stride = 1, col_stride =
+// ld`; row-major is the mirror; and a transpose is the same storage with the two strides swapped, so
+// no routine takes a `trans` flag. A routine that packs a matrix absorbs whatever strides it is given.
+
+/** A read-only `rows` x `cols` matrix over `data`. */
+struct Matrix[T]
+    data: []const T
+    rows: usize
+    cols: usize
+    row_stride: usize
+    col_stride: usize
+
+/** A `rows` x `cols` matrix the routine writes, with the same layout rules as `Matrix`. */
+struct MatrixMut[T]
+    data: []T
+    rows: usize
+    cols: usize
+    row_stride: usize
+    col_stride: usize
+
+/** True when every element of a `rows` x `cols` matrix with these strides is inside `have` elements. */
+private[blas] spans(have: usize, rows: usize, cols: usize, rs: usize, cs: usize) -> bool = rows == 0 || cols == 0 || (rows - 1) * rs + (cols - 1) * cs < have
+
+/** A matrix with any two strides; traps if `data` is too short to hold it. */
+matrix[T](data: []const T, rows: usize, cols: usize, row_stride: usize, col_stride: usize) -> Matrix[T]
+    assert(spans(data.len, rows, cols, row_stride, col_stride), "a matrix view reaches past the end of its data")
+    Matrix(data, rows, cols, row_stride, col_stride)
+
+/** A writable matrix with any two strides; traps if `data` is too short to hold it. */
+matrix_mut[T](data: []T, rows: usize, cols: usize, row_stride: usize, col_stride: usize) -> MatrixMut[T]
+    assert(spans(data.len, rows, cols, row_stride, col_stride), "a matrix view reaches past the end of its data")
+    MatrixMut(data, rows, cols, row_stride, col_stride)
+
+/** A column-major matrix whose columns start `ld` elements apart, as BLAS's `lda`; traps if `ld` is
+ * less than `rows` or `data` is too short.
+ */
+col_major[T](data: []const T, rows: usize, cols: usize, ld: usize) -> Matrix[T]
+    assert(ld >= rows, "a column-major matrix's leading dimension is less than its row count")
+    matrix(data, rows, cols, 1, ld)
+
+/** A writable column-major matrix whose columns start `ld` elements apart. */
+col_major_mut[T](data: []T, rows: usize, cols: usize, ld: usize) -> MatrixMut[T]
+    assert(ld >= rows, "a column-major matrix's leading dimension is less than its row count")
+    matrix_mut(data, rows, cols, 1, ld)
+
+impl[T] Matrix[T]
+    /** Element (i, j). */
+    at(self, i: usize, j: usize) -> T = self.data[i * self.row_stride + j * self.col_stride]
+
+    /** The transpose: the same storage, the two strides swapped. */
+    t(self) -> Matrix[T] = Matrix(self.data, self.cols, self.rows, self.col_stride, self.row_stride)
+
+impl[T] MatrixMut[T]
+    at(self, i: usize, j: usize) -> T = self.data[i * self.row_stride + j * self.col_stride]
+
+    set(self, i: usize, j: usize, v: T)
+        self.data[i * self.row_stride + j * self.col_stride] = v
+
+    t(self) -> MatrixMut[T] = MatrixMut(self.data, self.cols, self.rows, self.col_stride, self.row_stride)
+
+    /** The same elements, read-only. */
+    as_view(self) -> Matrix[T] = Matrix(self.data, self.rows, self.cols, self.row_stride, self.col_stride)
