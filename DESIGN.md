@@ -61,8 +61,8 @@ contiguous kernel and a scalar walk that follows arbitrary strides. `nrm2` keeps
 per lane, one per Blue band, at 64 bytes of lanes (128 spills); its band is chosen per lane by mask on
 `|v|`, a NaN falling in neither outer band and so in the middle sum, as the scalar rule puts it.
 `iamax` takes the kernel only at stride 1, where BLAS order is storage order: per 16 KB chunk, the
-lane-wise largest magnitude with NaN lanes never chosen (a lane mask records the NaNs, which costs
-one compare and one OR per vector), then, only when that beats every earlier chunk, a second pass from
+lane-wise NaN-propagating `maximum` of the magnitudes (one `fmax` per register, and a NaN anywhere
+makes the chunk's largest a NaN), then, only when that beats every earlier chunk, a second pass from
 L1 for the first element holding it, so ties go to the earliest index. A chunk holding a NaN ends the
 search at the first one, which is the first NaN overall.
 
@@ -355,6 +355,11 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   its views are; `gemm_par`'s jobs capture the `Matrix[T]` `a` and `b`, the `MatrixMut[T]` `c` and
   the `GemmWork[T]` whole, with no view rebuilt from its fields inside the closure.
 
+- **F7: no vector form of the NaN-propagating maximum — fixed in sysl 0.8.3**, where
+  `a.maximum(b)` and `a.maximum()` are IEEE 754-2019's maximum per lane and across lanes (`fmax`, one
+  instruction per register on AArch64). `iamax` keeps one running `maximum` of the magnitudes per chunk
+  and tests the result against itself for a NaN, with no per-lane compare or sum in the loop.
+
 ## Open questions for the user
 
 1. **The C-ABI layer**: provide `cblas_*` exports (and the Fortran `dgemm_` symbols)? In this package
@@ -385,9 +390,5 @@ least 80% of its DGEMM), with Accelerate reported alongside.
     `syrk`, `trsv`) to show whether that is worth a type per triangle.
 14. **`iamax` and NaN** — *decided*: the first NaN wins over everything, infinities included; with no
     NaN, the first element of largest magnitude (reference LAPACK 3.10's `i?amax`). Accelerate and
-    OpenBLAS differ (see Oracles). **Cost**: the kernel is bound by vector ALU throughput (abs,
-    compare, select per register), so the one extra operation per vector that detects a NaN (a lane
-    sum, NaN-valued where a NaN was added) costs about a third: f64 `iamax` 85 -> 54 GB/s, f32
-    90 -> 54, measured at load 6-8 against the previous kernel. Per-vector `any()`, a mask OR, a
-    NaN-poisoning select and a separate scan pass were all slower. The way back to the old speed is a
-    lane-wise NaN-aware maximum (`llvm.maximum` on a vector, which `extern` refuses today).
+    OpenBLAS differ (see Oracles). The kernel carries a running NaN-propagating lane-wise `maximum`
+    (F7), so detecting a NaN costs nothing beyond the max itself.

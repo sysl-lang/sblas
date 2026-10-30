@@ -113,8 +113,10 @@ What the numbers say:
 - **Every Level 1 routine but `iamax` is at OpenBLAS parity or better** at every size and both widths;
   `copy` in L2 and DRAM (75–85%) and f32 `asum` in L2 (89%) are the places below. `nrm2` runs 2.3x
   OpenBLAS's at f64 and 4.3–4.7x at f32, and 49–59% of Accelerate's, with Blue's scaling kept.
-- **`iamax` is 76–106% of OpenBLAS.** It reads each chunk of 16 KB once for the largest magnitude, lane
-  by lane, and a second time from L1 only when that beats every chunk before it.
+- **`iamax` is 76–106% of OpenBLAS** in the rows above, which were measured with the previous
+  kernel; the `maximum`-based kernel has not been timed yet (load stayed above 10). It reads each
+  chunk of 16 KB once for the NaN-propagating largest magnitude, one `fmax` per register, and a second
+  time from L1 only when that beats every chunk before it.
 - **Level 2 is at OpenBLAS parity or better** except `ger` in f64 L2 and DRAM (91–94%) and f32 `gemv N`
   at 48 (83%, where OpenBLAS's small-matrix path wins), and 15–136% of Accelerate.
 - **Against Accelerate in L2 the streaming routines reach 13–42%.** On M4 and later Accelerate runs

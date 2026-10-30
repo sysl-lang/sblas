@@ -266,6 +266,36 @@ iamax_nan_positions()
     other[0] = f64.nan()
     assert(iamax(strided(other[..], 1, 1)) == Some(0), "one element, NaN")
 
+@test("iamax: a NaN after an equal-maximum tie, a negative NaN, and infinities beside NaN, at every position")
+iamax_nan_after_tie()
+    var xs: [37]f64
+    var fs: [37]f32
+    for k in 0..<usize(37)
+        for i in 0..<37
+            xs[i] = 2
+            fs[i] = 2
+        xs[0] = 7
+        xs[1] = -7
+        fs[0] = 7
+        fs[1] = -7
+        if k > 1
+            xs[k] = -f64.nan()
+            fs[k] = -f32.nan()
+            assert(iamax(view(xs[..])) == Some(k), "f64, negative NaN after a tie")
+            assert(iamax(view(fs[..])) == Some(k), "f32, negative NaN after a tie")
+        xs[k] = f64.infinity()
+        fs[k] = f32.infinity()
+        xs[(k + 1) % 37] = f64.nan()
+        fs[(k + 1) % 37] = f32.nan()
+        assert(iamax(view(xs[..])) == Some((k + 1) % 37), "f64, NaN next to an infinity")
+        assert(iamax(view(fs[..])) == Some((k + 1) % 37), "f32, NaN next to an infinity")
+        xs[(k + 1) % 37] = -f64.infinity()
+        fs[(k + 1) % 37] = -f32.infinity()
+        xs[(k + 2) % 37] = f64.nan()
+        fs[(k + 2) % 37] = f32.nan()
+        assert(iamax(view(xs[..])) == Some((k + 2) % 37), "f64, infinities of both signs, then NaN")
+        assert(iamax(view(fs[..])) == Some((k + 2) % 37), "f32, infinities of both signs, then NaN")
+
 @test("iamax across chunks: ties to the earlier chunk, a larger value in a later one, NaN at a chunk's start")
 iamax_chunks()
     var xs: [5000]f64
