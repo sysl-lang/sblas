@@ -36,6 +36,7 @@ Needs sysl 0.8.0.
 | directory | what |
 |---|---|
 | `sh/sysl/blas/` | the package, and its tests against the definitions (`nrm2`'s range, `rotg`'s signs, `iamax`'s ties) |
+| `sh/sysl/blas/netlib_tests.sysl` | netlib's own Level 1 test tables (`dblat1.f`, `sblat1.f`) ported: the fixed vectors and expected results at every stride in them, with netlib's `SFAC`-scaled comparison |
 | `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign |
 | `bench/` | GB/s of every contiguous routine against Accelerate and OpenBLAS; figures in [bench/README.md](bench/README.md) |
 

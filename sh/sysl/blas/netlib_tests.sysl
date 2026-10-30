@@ -1,0 +1,687 @@
+module sh.sysl.blas
+@no_alloc
+@tests
+
+// The reference BLAS's own Level 1 test tables, ported: the fixed input vectors and the expected
+// results that netlib's test programs carry for dot, axpy, rotg, rot, copy, swap, nrm2, asum, scal and
+// iamax. They depend on no vendor library, so they stand beside the Accelerate and OpenBLAS checks in
+// oracle/ as a third, independent witness.
+//
+//   source   https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/BLAS/TESTING/dblat1.f
+//            sha256 093e7f23f616f184b99c43d5adf7678725fba338c88d607548ae2aee8f4ab324
+//   source   https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/BLAS/TESTING/sblat1.f
+//            sha256 02d01fda4f3aa6e696817af2ce618c0c102c696214c61f1608731418127bd684
+//
+// (www.netlib.org/blas/blast/ no longer serves them; the Reference-LAPACK copies are the same programs.)
+// The two files carry identical decimal tables for these routines, so one set of f64 literals serves
+// both widths: each run converts it to the width under test, which rounds to the nearest value exactly
+// as the Fortran compiler does with a single-precision literal. Only the constants that depend on the
+// format (rotg's ninth case, nrm2's safe range) differ, and they are passed in.
+//
+// The comparison is netlib's STEST: a result passes when |SFAC * (got - want)| <= |size| * epsilon,
+// with SFAC = 2^-10 (9.765625e-4) and `size` the expected value itself unless the table gives another.
+// A table value of zero therefore has to be matched exactly. copy and swap use SFAC = 1 and size 0.
+//
+// Not ported: rotm, rotmg, axpby and dsdot/sdsdot, which this package does not provide.
+//
+// Where the package's documented behaviour differs from netlib, the test checks the package's own
+// definition and says so: the only such case is iamax with a NaN that is not element 0 (netlib's
+// i?amax returns the first NaN, this package's `iamax` never prefers a NaN; see its documentation).
+// Every strided case, negative strides included, agrees with netlib: for two-vector routines both
+// walk a negative stride backwards from the far end, and the one negative-stride one-vector call in
+// netlib's tables (nrm2, inside the scaling test) is a walk too.
+
+val sfac_value: f64 = 0x1p-10
+
+// --- The comparison -------------------------------------------------------------------------------
+
+private agree[T: Real](sf: T, got: T, want: T, size: T) -> bool = (sf * (got - want)).abs() <= size.abs() * T.epsilon()
+
+private stest1[T: Real](what: string, sf: T, got: T, want: T, size: T)
+    val ok = agree(sf, got, want, size)
+    if !ok
+        print(what)
+        print(f64(got))
+        print(f64(want))
+    assert(ok, what)
+
+/** STEST with each element's own expected value as its size. */
+private stest_self[T: Real](what: string, sf: T, got: []const T, want: []const T)
+    assert(got.len == want.len, what)
+    for i in 0..<got.len
+        stest1(what, sf, got[i], want[i], want[i])
+
+/** STEST with one size for every element. */
+private stest_sized[T: Real](what: string, sf: T, got: []const T, want: []const T, size: T)
+    assert(got.len == want.len, what)
+    for i in 0..<got.len
+        stest1(what, sf, got[i], want[i], size)
+
+private conv[T: Real](lit: f64 -> T, src: []const f64, dst: []T)
+    for i in 0..<dst.len
+        dst[i] = lit(src[i])
+
+// --- Shared inputs --------------------------------------------------------------------------------
+
+val dx1: [7]f64 = [0.6, 0.1, -0.5, 0.8, 0.9, -0.3, -0.4]
+val dy1: [7]f64 = [0.5, -0.9, 0.3, 0.7, -0.6, 0.2, 0.8]
+val incxs: [4]int = [1, 2, -2, -1]
+val incys: [4]int = [1, -2, 1, -2]
+val ns: [4]usize = [0, 1, 2, 4]
+val lens: [8]usize = [1, 1, 2, 4, 1, 1, 3, 7]
+val ssize1: [4]f64 = [0.0, 0.3, 1.6, 3.2]
+
+/** How many elements of a seven-element array a vector of the case's length reaches. */
+private reach(kn: usize, inc: int) -> usize = lens[4 * (usize(inc.abs()) - 1) + kn]
+
+/** SSIZE2: zero for the empty case, 1.17 otherwise. */
+private case_size(kn: usize) -> f64 = if kn == 0 then 0.0 else 1.17
+
+private fresh[T: Real](lit: f64 -> T, sx: []T, sy: []T)
+    conv(lit, dx1[..], sx)
+    conv(lit, dy1[..], sy)
+
+// --- dot ------------------------------------------------------------------------------------------
+
+val dt7: [16]f64 = [0.0, 0.30, 0.21, 0.62, 0.0,
+    0.30, -0.07, 0.85, 0.0, 0.30, -0.79,
+    -0.74, 0.0, 0.30, 0.33, 1.27]
+
+private run_dot[T: Real](lit: f64 -> T)
+    val sf = lit(sfac_value)
+    var sx: [7]T
+    var sy: [7]T
+    var t7: [16]T
+    conv(lit, dt7[..], t7[..])
+    fresh(lit, sx[..], sy[..])
+    for ki in 0..<4
+        for kn in 0..<4
+            val got = dot(strided(sx[..], ns[kn], incxs[ki]), strided(sy[..], ns[kn], incys[ki]))
+            stest1("dot table", sf, got, t7[kn + 4 * ki], lit(ssize1[kn]))
+    // N = 16 on small integers, unit strides: the unrolled body plus a remainder.
+    var xl: [16]T
+    var yl: [16]T
+    var sum = T.zero()
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+        yl[i] = lit(f64(int(i + 1) % 5 - 2))
+        sum = sum + xl[i] * yl[i]
+    stest1("dot, n = 16", sf, dot(view(xl[..]), view(yl[..])), sum, sum)
+
+@test("netlib dblat1: dot table, f64")
+netlib_dot_f64()
+    run_dot[f64](x -> x)
+
+@test("netlib sblat1: dot table, f32")
+netlib_dot_f32()
+    run_dot[f32](x -> f32(x))
+
+// --- axpy -----------------------------------------------------------------------------------------
+
+val dt8: [112]f64 = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.68, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.68, -0.87, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.68, -0.87, 0.15,
+    0.94, 0.0, 0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.68,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.35, -0.9, 0.48, 0.0, 0.0, 0.0,
+    0.0, 0.38, -0.9, 0.57, 0.7, -0.75,
+    0.2, 0.98, 0.5, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.68, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.35, -0.72,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.38,
+    -0.63, 0.15, 0.88, 0.0, 0.0, 0.0,
+    0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.68, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.68, -0.9, 0.33, 0.0, 0.0,
+    0.0, 0.0, 0.68, -0.9, 0.33, 0.7,
+    -0.75, 0.2, 1.04]
+
+private run_axpy[T: Real](lit: f64 -> T)
+    val sf = lit(sfac_value)
+    val sa = lit(0.3)
+    var sx: [7]T
+    var sy: [7]T
+    var sty: [7]T
+    for ki in 0..<4
+        for kn in 0..<4
+            fresh(lit, sx[..], sy[..])
+            axpy(sa, strided(sx[..], ns[kn], incxs[ki]), strided_mut(sy[..], ns[kn], incys[ki]))
+            val leny = reach(kn, incys[ki])
+            val at = 28 * ki + 7 * kn
+            conv(lit, dt8[at..<at + leny], sty[0..<leny])
+            stest_sized("axpy table", sf, sy[0..<leny], sty[0..<leny], lit(case_size(kn)))
+    // alpha = 0 touches nothing: not even a NaN in x reaches y.
+    fresh(lit, sx[..], sy[..])
+    sx[3] = T.nan()
+    axpy(T.zero(), view(sx[..]), view_mut(sy[..]))
+    conv(lit, dy1[..], sty[..])
+    stest_self("axpy, alpha = 0", sf, sy[..], sty[..])
+    // N = 16 on small integers.
+    var xl: [16]T
+    var yl: [16]T
+    var tl: [16]T
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+        yl[i] = lit(f64(int(i + 1) % 5 - 2))
+        tl[i] = yl[i] + sa * xl[i]
+    axpy(sa, view(xl[..]), view_mut(yl[..]))
+    stest_self("axpy, n = 16", sf, yl[..], tl[..])
+
+@test("netlib dblat1: axpy table, f64")
+netlib_axpy_f64()
+    run_axpy[f64](x -> x)
+
+@test("netlib sblat1: axpy table, f32")
+netlib_axpy_f32()
+    run_axpy[f32](x -> f32(x))
+
+// --- copy and swap --------------------------------------------------------------------------------
+
+val dt10x: [112]f64 = [0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.5, -0.9, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, -0.9, 0.3, 0.7,
+    0.0, 0.0, 0.0, 0.6, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.3, 0.1, 0.5, 0.0,
+    0.0, 0.0, 0.0, 0.8, 0.1, -0.6,
+    0.8, 0.3, -0.3, 0.5, 0.6, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, -0.9,
+    0.1, 0.5, 0.0, 0.0, 0.0, 0.0, 0.7,
+    0.1, 0.3, 0.8, -0.9, -0.3, 0.5,
+    0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.5, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.5, 0.3, -0.6, 0.8, 0.0, 0.0,
+    0.0]
+
+val dt10y: [112]f64 = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.6, 0.1, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.6, 0.1, -0.5, 0.8, 0.0,
+    0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.6, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, -0.5, -0.9, 0.6, 0.0,
+    0.0, 0.0, 0.0, -0.4, -0.9, 0.9,
+    0.7, -0.5, 0.2, 0.6, 0.5, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.6, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, -0.5,
+    0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+    -0.4, 0.9, -0.5, 0.6, 0.0, 0.0,
+    0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.6, -0.9, 0.1, 0.0, 0.0,
+    0.0, 0.0, 0.6, -0.9, 0.1, 0.7,
+    -0.5, 0.2, 0.8]
+
+private run_copy[T: Real](lit: f64 -> T)
+    val one = T.one()
+    var sx: [7]T
+    var sy: [7]T
+    var sty: [7]T
+    for ki in 0..<4
+        for kn in 0..<4
+            fresh(lit, sx[..], sy[..])
+            copy(strided(sx[..], ns[kn], incxs[ki]), strided_mut(sy[..], ns[kn], incys[ki]))
+            val leny = reach(kn, incys[ki])
+            val at = 28 * ki + 7 * kn
+            conv(lit, dt10y[at..<at + leny], sty[0..<leny])
+            stest_sized("copy table", one, sy[0..<leny], sty[0..<leny], T.zero())
+    // Both strides zero: every element lands on the one cell, and N = 0 leaves it alone.
+    for kn in 0..<4
+        var sx0: [1]T = [lit(42.0)]
+        var sy0: [1]T = [lit(43.0)]
+        copy(strided(sx0[..], ns[kn], 0), strided_mut(sy0[..], ns[kn], 0))
+        val want = if kn == 0 then lit(43.0) else lit(42.0)
+        stest1("copy, both strides zero", one, sy0[0], want, T.zero())
+    // N = 16.
+    var xl: [16]T
+    var yl: [16]T
+    var tl: [16]T
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+        yl[i] = lit(f64(int(i + 1) % 5 - 2))
+        tl[i] = xl[i]
+    copy(view(xl[..]), view_mut(yl[..]))
+    stest_sized("copy, n = 16", one, yl[..], tl[..], T.zero())
+
+@test("netlib dblat1: copy table, f64")
+netlib_copy_f64()
+    run_copy[f64](x -> x)
+
+@test("netlib sblat1: copy table, f32")
+netlib_copy_f32()
+    run_copy[f32](x -> f32(x))
+
+private run_swap[T: Real](lit: f64 -> T)
+    val one = T.one()
+    var sx: [7]T
+    var sy: [7]T
+    var stx: [7]T
+    var sty: [7]T
+    for ki in 0..<4
+        for kn in 0..<4
+            fresh(lit, sx[..], sy[..])
+            swap(strided_mut(sx[..], ns[kn], incxs[ki]), strided_mut(sy[..], ns[kn], incys[ki]))
+            val lenx = reach(kn, incxs[ki])
+            val leny = reach(kn, incys[ki])
+            val at = 28 * ki + 7 * kn
+            conv(lit, dt10x[at..<at + lenx], stx[0..<lenx])
+            conv(lit, dt10y[at..<at + leny], sty[0..<leny])
+            stest_sized("swap table, x", one, sx[0..<lenx], stx[0..<lenx], T.zero())
+            stest_sized("swap table, y", one, sy[0..<leny], sty[0..<leny], T.zero())
+    // N = 16.
+    var xl: [16]T
+    var yl: [16]T
+    var txl: [16]T
+    var tyl: [16]T
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+        yl[i] = lit(f64(int(i + 1) % 5 - 2))
+        txl[i] = yl[i]
+        tyl[i] = xl[i]
+    swap(view_mut(xl[..]), view_mut(yl[..]))
+    stest_sized("swap, n = 16, x", one, xl[..], txl[..], T.zero())
+    stest_sized("swap, n = 16, y", one, yl[..], tyl[..], T.zero())
+
+@test("netlib dblat1: swap table, f64")
+netlib_swap_f64()
+    run_swap[f64](x -> x)
+
+@test("netlib sblat1: swap table, f32")
+netlib_swap_f32()
+    run_swap[f32](x -> f32(x))
+
+// --- rot ------------------------------------------------------------------------------------------
+
+val dt9x: [112]f64 = [0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.78, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.78, -0.46, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.78, -0.46, -0.22,
+    1.06, 0.0, 0.0, 0.0, 0.6, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.78,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.66, 0.1, -0.1, 0.0, 0.0, 0.0,
+    0.0, 0.96, 0.1, -0.76, 0.8, 0.90,
+    -0.3, -0.02, 0.6, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.78, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, -0.06, 0.1,
+    -0.1, 0.0, 0.0, 0.0, 0.0, 0.90,
+    0.1, -0.22, 0.8, 0.18, -0.3, -0.02,
+    0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.78, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.78, 0.26, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.78, 0.26, -0.76, 1.12,
+    0.0, 0.0, 0.0]
+
+val dt9y: [112]f64 = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.04, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.04, -0.78, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.04, -0.78, 0.54,
+    0.08, 0.0, 0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.04,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7,
+    -0.9, -0.12, 0.0, 0.0, 0.0, 0.0,
+    0.64, -0.9, -0.30, 0.7, -0.18, 0.2,
+    0.28, 0.5, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.04, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.7, -1.08, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.64, -1.26,
+    0.54, 0.20, 0.0, 0.0, 0.0, 0.5,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.04, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.04, -0.9, 0.18, 0.0, 0.0,
+    0.0, 0.0, 0.04, -0.9, 0.18, 0.7,
+    -0.18, 0.2, 0.16]
+
+// The eleven mixed-stride cases that follow the table: (c, s), strides, count, and the expected x and y,
+// each on the vectors x = y = 1 2 3 4 5.
+val mwp_c: [11]f64 = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+val mwp_s: [11]f64 = [0, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1]
+val mwp_incx: [11]int = [1, 1, 1, -1, 1, -1, 1, 1, -1, 1, -1]
+val mwp_incy: [11]int = [1, 1, -1, -1, 2, 1, 1, -1, -1, 2, 1]
+val mwp_n: [11]usize = [5, 5, 5, 5, 3, 5, 5, 5, 5, 3, 5]
+val mwp_tx: [55]f64 = [1, 2, 3, 4, 5,
+    1, 2, 3, 4, 5,
+    5, 4, 3, 2, 1,
+    1, 2, 3, 4, 5,
+    1, 3, 5, 4, 5,
+    5, 4, 3, 2, 1,
+    -1, -2, -3, -4, -5,
+    -5, -4, -3, -2, -1,
+    -1, -2, -3, -4, -5,
+    -1, -3, -5, 4, 5,
+    -5, -4, -3, -2, -1]
+val mwp_ty: [55]f64 = [1, 2, 3, 4, 5,
+    -1, -2, -3, -4, -5,
+    -5, -4, -3, -2, -1,
+    -1, -2, -3, -4, -5,
+    -1, 2, -2, 4, -3,
+    -5, -4, -3, -2, -1,
+    1, 2, 3, 4, 5,
+    5, 4, 3, 2, 1,
+    1, 2, 3, 4, 5,
+    1, 2, 2, 4, 3,
+    5, 4, 3, 2, 1]
+
+private run_rot[T: Real](lit: f64 -> T)
+    val sf = lit(sfac_value)
+    val c = lit(0.8)
+    val s = lit(0.6)
+    var sx: [7]T
+    var sy: [7]T
+    var stx: [7]T
+    var sty: [7]T
+    for ki in 0..<4
+        for kn in 0..<4
+            fresh(lit, sx[..], sy[..])
+            rot(strided_mut(sx[..], ns[kn], incxs[ki]), strided_mut(sy[..], ns[kn], incys[ki]), c, s)
+            val lenx = reach(kn, incxs[ki])
+            val leny = reach(kn, incys[ki])
+            val at = 28 * ki + 7 * kn
+            conv(lit, dt9x[at..<at + lenx], stx[0..<lenx])
+            conv(lit, dt9y[at..<at + leny], sty[0..<leny])
+            stest_sized("rot table, x", sf, sx[0..<lenx], stx[0..<lenx], lit(case_size(kn)))
+            stest_sized("rot table, y", sf, sy[0..<leny], sty[0..<leny], lit(case_size(kn)))
+    var cx: [5]T
+    var cy: [5]T
+    var tx: [5]T
+    var ty: [5]T
+    for k in 0..<11
+        for j in 0..<5
+            cx[j] = lit(f64(j + 1))
+            cy[j] = lit(f64(j + 1))
+            tx[j] = lit(mwp_tx[5 * k + j])
+            ty[j] = lit(mwp_ty[5 * k + j])
+        rot(strided_mut(cx[..], mwp_n[k], mwp_incx[k]), strided_mut(cy[..], mwp_n[k], mwp_incy[k]), lit(mwp_c[k]), lit(mwp_s[k]))
+        stest_self("rot, mixed strides, x", sf, cx[..], tx[..])
+        stest_self("rot, mixed strides, y", sf, cy[..], ty[..])
+
+@test("netlib dblat1: rot table and mixed strides, f64")
+netlib_rot_f64()
+    run_rot[f64](x -> x)
+
+@test("netlib sblat1: rot table and mixed strides, f32")
+netlib_rot_f32()
+    run_rot[f32](x -> f32(x))
+
+// --- rotg -----------------------------------------------------------------------------------------
+
+val rg_a: [8]f64 = [0.3, 0.4, -0.3, -0.4, -0.3, 0.0, 0.0, 1.0]
+val rg_b: [8]f64 = [0.4, 0.3, 0.4, 0.3, -0.4, 0.0, 1.0, 0.0]
+val rg_c: [8]f64 = [0.6, 0.8, -0.6, 0.8, 0.6, 1.0, 0.0, 1.0]
+val rg_s: [8]f64 = [0.8, 0.6, 0.8, -0.6, 0.8, 0.0, 1.0, 0.0]
+val rg_r: [8]f64 = [0.5, 0.5, 0.5, -0.5, -0.5, 0.0, 1.0, 1.0]
+
+/** `a9` and `b9` are the ninth case: `a` so small against `b` that `c = a / r` underflows to zero. */
+private run_rotg[T: Real](lit: f64 -> T, a9: T, b9: T)
+    val sf = lit(sfac_value)
+    // netlib's z, which it stores in place of b: 1/c when |a| <= |b| and c is not zero, s when |a| > |b|.
+    var z: [8]T
+    z[0] = T.one() / lit(0.6)
+    z[1] = lit(0.6)
+    z[2] = -(T.one() / lit(0.6))
+    z[3] = lit(-0.6)
+    z[4] = T.one() / lit(0.6)
+    z[5] = T.zero()
+    z[6] = T.one()
+    z[7] = T.zero()
+    for k in 0..<8
+        val g = rotg(lit(rg_a[k]), lit(rg_b[k]))
+        stest1("rotg r", sf, g.r, lit(rg_r[k]), lit(rg_r[k]))
+        stest1("rotg z", sf, g.z, z[k], z[k])
+        stest1("rotg c", sf, g.c, lit(rg_c[k]), lit(rg_c[k]))
+        stest1("rotg s", sf, g.s, lit(rg_s[k]), lit(rg_s[k]))
+    val g9 = rotg(a9, b9)
+    stest1("rotg 9 r", sf, g9.r, b9, b9)
+    stest1("rotg 9 z", sf, g9.z, T.one(), T.one())
+    stest1("rotg 9 c", sf, g9.c, T.zero(), T.zero())
+    stest1("rotg 9 s", sf, g9.s, T.one(), T.one())
+
+@test("netlib dblat1: rotg table, f64")
+netlib_rotg_f64()
+    run_rotg[f64](x -> x, 0x1p-1000, 0x1p100)
+
+@test("netlib sblat1: rotg table, f32")
+netlib_rotg_f32()
+    run_rotg[f32](x -> f32(x), 0x1p-100, 0x1p60)
+
+// --- nrm2, asum, scal, iamax ----------------------------------------------------------------------
+
+val dv: [80]f64 = [0.1, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+    0.3, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+    0.3, -0.4, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0,
+    0.2, -0.6, 0.3, 5.0, 5.0, 5.0, 5.0, 5.0,
+    0.1, -0.3, 0.5, -0.1, 6.0, 6.0, 6.0, 6.0,
+    0.1, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+    0.3, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0,
+    0.3, 2.0, -0.4, 2.0, 2.0, 2.0, 2.0, 2.0,
+    0.2, 3.0, -0.6, 5.0, 0.3, 2.0, 2.0, 2.0,
+    0.1, 4.0, -0.3, 6.0, -0.5, 7.0, -0.1, 3.0]
+
+val dtrue5: [80]f64 = [0.10, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+    -0.3, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+    0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0,
+    0.20, -0.60, 0.30, 5.0, 5.0, 5.0, 5.0, 5.0,
+    0.03, -0.09, 0.15, -0.03, 6.0, 6.0, 6.0, 6.0,
+    0.10, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+    0.09, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0,
+    0.09, 2.0, -0.12, 2.0, 2.0, 2.0, 2.0, 2.0,
+    0.06, 3.0, -0.18, 5.0, 0.09, 2.0, 2.0, 2.0,
+    0.03, 4.0, -0.09, 6.0, -0.15, 7.0, -0.03, 3.0]
+
+val sa5: [10]f64 = [0.3, -1.0, 0.0, 1.0, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]
+val dtrue1: [5]f64 = [0.0, 0.3, 0.5, 0.7, 0.6]
+val dtrue3: [5]f64 = [0.0, 0.3, 0.7, 1.1, 1.0]
+val itrue2: [5]int = [0, 1, 2, 2, 3]
+val itruec: [5]int = [0, 1, 1, 1, 1]
+val dvr: [8]f64 = [8.0, -7.0, 9.0, 5.0, 9.0, 8.0, 7.0, 7.0]
+
+/** netlib's one-based result, 0 for an empty vector, as this package's `Option`. */
+private one_based(k: int) -> Option[usize] = if k == 0 then None else Some(usize(k - 1))
+
+private run_nrm2_asum[T: Real](lit: f64 -> T)
+    val sf = lit(sfac_value)
+    var sx: [8]T
+    for kx in 0..<2
+        val incx = int(kx) + 1
+        for n in 0..<5
+            val len = 2 * (if n > 1 then n else 1)
+            val at = 8 * n + 40 * kx
+            conv(lit, dv[at..<at + len], sx[0..<len])
+            val want1 = lit(dtrue1[n])
+            val want3 = lit(dtrue3[n])
+            stest1("nrm2 table", sf, nrm2(strided(sx[..], n, incx)), want1, want1)
+            stest1("asum table", sf, asum(strided(sx[..], n, incx)), want3, want3)
+    // N = 16.
+    var xl: [16]T
+    var sq = T.zero()
+    var ab = T.zero()
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+    xl[10] = lit(-9.0)
+    for i in 0..<16
+        sq = sq + xl[i] * xl[i]
+        ab = ab + xl[i].abs()
+    stest1("nrm2, n = 16", sf, nrm2(view(xl[..])), sq.sqrt(), sq.sqrt())
+    stest1("asum, n = 16", sf, asum(view(xl[..])), ab, ab)
+
+@test("netlib dblat1: nrm2 and asum tables, f64")
+netlib_nrm2_asum_f64()
+    run_nrm2_asum[f64](x -> x)
+
+@test("netlib sblat1: nrm2 and asum tables, f32")
+netlib_nrm2_asum_f32()
+    run_nrm2_asum[f32](x -> f32(x))
+
+private run_scal[T: Real](lit: f64 -> T)
+    val sf = lit(sfac_value)
+    var sx: [8]T
+    var st: [8]T
+    for kx in 0..<2
+        val incx = int(kx) + 1
+        for n in 0..<5
+            val len = 2 * (if n > 1 then n else 1)
+            val at = 8 * n + 40 * kx
+            conv(lit, dv[at..<at + len], sx[0..<len])
+            conv(lit, dtrue5[at..<at + len], st[0..<len])
+            scal(lit(sa5[5 * kx + n]), strided_mut(sx[..], n, incx))
+            stest_self("scal table", sf, sx[0..<len], st[0..<len])
+    // N = 16.
+    var xl: [16]T
+    var tl: [16]T
+    val a = lit(0.3)
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+        tl[i] = a * xl[i]
+    scal(a, view_mut(xl[..]))
+    stest_self("scal, n = 16", sf, xl[..], tl[..])
+    // A NaN in x survives an alpha of zero: scal multiplies, it does not store zeros.
+    xl[2] = T.nan()
+    scal(T.zero(), view_mut(xl[..]))
+    assert(xl[2].is_nan(), "scal by zero keeps a NaN")
+
+@test("netlib dblat1: scal table, f64")
+netlib_scal_f64()
+    run_scal[f64](x -> x)
+
+@test("netlib sblat1: scal table, f32")
+netlib_scal_f32()
+    run_scal[f32](x -> f32(x))
+
+private run_iamax[T: Real](lit: f64 -> T)
+    var sx: [8]T
+    for kx in 0..<2
+        val step = kx + 1
+        val incx = int(step)
+        for n in 0..<5
+            val len = 2 * (if n > 1 then n else 1)
+            val at = 8 * n + 40 * kx
+            conv(lit, dv[at..<at + len], sx[0..<len])
+            assert(iamax(strided(sx[..], n, incx)) == one_based(itrue2[n]), "iamax table")
+            for i in 0..<len
+                sx[i] = lit(42.0)
+            assert(iamax(strided(sx[..], n, incx)) == one_based(itruec[n]), "iamax of equal magnitudes: the first")
+        // Eight values with a repeated maximum, at this stride.
+        var sxr: [15]T
+        for i in 0..<15
+            sxr[i] = T.zero()
+        for i in 0..<8
+            sxr[i * step] = lit(dvr[i])
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, first of two equal maxima")
+        // The first infinity wins, and a later one does not displace it.
+        sxr[2 * step] = T.infinity()
+        sxr[4 * step] = T.infinity()
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, first infinity")
+        // NaNs. netlib's i?amax returns the first NaN wherever it is (4, 4, 1 and 7 below). This package's
+        // iamax never prefers a NaN: it answers the largest ordinary magnitude, or element 0 when that is
+        // the NaN, as its documentation says; the expected values here are that definition's.
+        for i in 0..<8
+            sxr[i * step] = lit(dvr[i])
+        sxr[3 * step] = T.nan()
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, a NaN at element 4 is passed over (netlib: 4)")
+        sxr[5 * step] = T.nan()
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, two NaNs are passed over (netlib: 4)")
+        sxr[0] = T.nan()
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(1), "iamax, a NaN at element 1 is chosen")
+        for i in 0..<8
+            sxr[i * step] = lit(dvr[i])
+        sxr[2 * step] = T.infinity()
+        sxr[4 * step] = T.infinity()
+        sxr[6 * step] = T.nan()
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, a NaN after an infinity is passed over (netlib: 7)")
+    // N = 16 with a unique maximum away from either end.
+    var xl: [16]T
+    for i in 0..<16
+        xl[i] = lit(f64(int(i + 1) % 7 - 3))
+    xl[10] = lit(-9.0)
+    assert(iamax(view(xl[..])) == one_based(11), "iamax, n = 16")
+
+@test("netlib dblat1: iamax table, f64")
+netlib_iamax_f64()
+    run_iamax[f64](x -> x)
+
+@test("netlib sblat1: iamax table, f32")
+netlib_iamax_f32()
+    run_iamax[f32](x -> f32(x))
+
+// --- nrm2's scaling test (Anderson, Algorithm 978, as netlib's ?B1NRM2) ---------------------------
+
+/** A repeatable value in [0, 1) for the key; netlib draws these from the Fortran RANDOM_NUMBER. */
+private unit(key: u64) -> f64
+    var z = key +% 0x9E3779B97F4A7C15
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    z = z ^ (z >> 31)
+    f64(z >> 11) * 0x1p-53
+
+/** One vector is x(1) = v0 and the rest random values in (-1, 1) scaled by v1, for every pair drawn from
+ * zero, tiny, small, ulp, one, 1/ulp, big, huge, infinity, NaN and the two values at the small
+ * threshold. nrm2 has to agree with the unscaled reference within 10 * n ulps, NaN with NaN and
+ * infinity with infinity. `bignum` is the format's 2^970 or 2^103. */
+private run_nrm2_scaling[T: Real](lit: f64 -> T, bignum: T, n: usize, incx: int)
+    if n == 0 then return
+    val zero = T.zero()
+    val one = T.one()
+    val half = lit(0.5)
+    val ulp = T.epsilon()
+    val safmin = T.safe_min()
+    val values: [12]T = [zero, lit(2.0) * safmin, one / bignum, ulp, one, one / ulp, bignum, T.safe_max(),
+        T.infinity(), T.nan(), safmin.sqrt(), safmin.sqrt() * (one - ulp)]
+    var work: [20]T
+    var wssq = zero
+    for i in 1..<n
+        work[i] = lit(1.0 - 2.0 * unit(64 * u64(n) + u64(i)))
+        wssq = wssq + work[i] * work[i]
+    val sqrt_n = lit(f64(n)).sqrt()
+    var x: [20]T
+    var z: [20]T
+    for iv in 0..<12
+        var v0 = values[iv]
+        if v0.abs() > one then v0 = v0 * half
+        for iw in 0..<12
+            var v1 = values[iw]
+            if v1.abs() > one then v1 = (v1 * half) / sqrt_n
+            z[0] = v0
+            for i in 1..<n
+                z[i] = v1 * work[i]
+            val y1 = v0.abs()
+            val y2 = if n > 1 then v1.abs() * wssq.sqrt() else zero
+            val ymin = if y1 < y2 then y1 else y2
+            val ymax = if y1 < y2 then y2 else y1
+            val ynrm = if y1.is_nan() || y2.is_nan() then y1 + y2 else if ymax == zero then zero else if ymin == ymax then lit(2.0).sqrt() * ymax else ymax * (one + (ymin / ymax).square()).sqrt()
+            for i in 0..<20
+                x[i] = lit(-1234.5678)
+            var ix = if incx < 0 then (int(n) - 1) * -incx else 0
+            for i in 0..<n
+                x[usize(ix)] = z[i]
+                ix += incx
+            val snrm = nrm2(strided(x[..], n, incx))
+            val znrm = if incx == 0 then sqrt_n * x[0].abs() else ynrm
+            val trat = if snrm.is_nan() || znrm.is_nan() then (if snrm.is_nan() != znrm.is_nan() then one / ulp else zero) else if snrm == znrm then zero else if znrm == zero then snrm / ulp else (((snrm - znrm).abs() / znrm) / (lit(f64(n)) * ulp))
+            val ok = !trat.is_nan() && trat < lit(10.0)
+            if !ok
+                print(n)
+                print(incx)
+                print(iv)
+                print(iw)
+                print(f64(trat))
+            assert(ok, "nrm2 scaling")
+
+private run_nrm2_scaling_all[T: Real](lit: f64 -> T, bignum: T)
+    for kx in 0..<2
+        val incx = int(kx) + 1
+        for n in 1..4
+            run_nrm2_scaling(lit, bignum, n, (incx - 2) * 2)
+            run_nrm2_scaling(lit, bignum, n, incx)
+
+@test("netlib dblat1: nrm2 over every pair of extreme values, strides -2, 0, 1, 2, f64")
+netlib_nrm2_scaling_f64()
+    run_nrm2_scaling_all[f64](x -> x, 0x1p970)
+
+@test("netlib sblat1: nrm2 over every pair of extreme values, strides -2, 0, 1, 2, f32")
+netlib_nrm2_scaling_f32()
+    run_nrm2_scaling_all[f32](x -> f32(x), 0x1p103)
