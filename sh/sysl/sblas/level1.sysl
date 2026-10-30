@@ -173,9 +173,8 @@ private const iamax_chunk_bytes: usize = 16384
 
 /** `iamax` of a non-empty contiguous `x`, read forwards.
  *
- * A chunk at a time: the lane-wise largest magnitude first (a NaN lane never wins it), beside lane
- * sums of the elements, which are NaN where a NaN was added (and where infinities of opposite sign
- * met, which the search for a real NaN then rules out). A chunk with a NaN ends the search: no earlier
+ * A chunk at a time: the NaN-propagating lane-wise `maximum` of the magnitudes, so a NaN anywhere in
+ * the chunk makes its largest a NaN. A chunk with a NaN ends the search: no earlier
  * chunk had one, so its first NaN is the answer. Otherwise only when the chunk's largest beats every chunk before it is there a second
  * pass, from L1, for the first element that has it; a later chunk that merely ties is not searched, so
  * ties go to the earliest index.
@@ -189,23 +188,16 @@ private iamax_kernel[T: Real, const W: usize](x: []const T) -> usize
         while c0 < x.len
             val c1 = if x.len - c0 > chunk then c0 + chunk else x.len
             var lanes: <W>T = -T.one()
-            var sums: <W>T = T.zero()
             var i = c0
             while i + W <= c1
                 val v: <W>T = x.load(i)
-                val a = v.abs()
-                lanes = (a > lanes).select(a, lanes)
-                sums = sums + v
+                lanes = lanes.maximum(v.abs())
                 i += W
-            var m = lanes.max()
-            var nan = (sums != sums).any()
+            var m = lanes.maximum()
             while i < c1
-                val a = x[i].abs()
-                if a > m then m = a
-                if a != a then nan = true
+                m = m.maximum(x[i].abs())
                 i += 1
-            if nan
-                // The sums are NaN for a NaN and also for opposite infinities, so look for a real one.
+            if m != m
                 var j = c0
                 while j < c1
                     if x[j].is_nan() then return j
