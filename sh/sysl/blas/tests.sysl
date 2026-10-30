@@ -230,12 +230,16 @@ iamax_ties()
     assert(iamax(strided(xs[..], 5, -1)) == Some(0))
     assert(iamax(strided(xs[..], 3, 2)) == Some(1))
 
-@test("iamax never prefers a NaN to a number after it")
+@test("iamax returns the first NaN, before any number or infinity")
 iamax_nan()
     val first: [2]f64 = [f64.nan(), 1]
     assert(iamax(view(first[..])) == Some(0))
     val later: [3]f64 = [1, f64.nan(), 2]
-    assert(iamax(view(later[..])) == Some(2))
+    assert(iamax(view(later[..])) == Some(1))
+    val inf: [4]f32 = [f32.infinity(), 2, f32.nan(), f32.nan()]
+    assert(iamax(view(inf[..])) == Some(2))
+    assert(iamax(strided(inf[..], 4, -1)) == Some(0))
+    assert(iamax(strided(inf[..], 2, 2)) == Some(1))
 
 // --- rotg -----------------------------------------------------------------------------------------
 

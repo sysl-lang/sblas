@@ -150,6 +150,21 @@ private check_iamax_ties[T: Oracle](lib: Lib)
         val got = iamax(strided(xs[..], n, inc))
         assert(got == Some(usize(T.o_iamax(lib, i32(n), as_mut_ptr(xs[..]), i32(inc)))), "iamax tie")
 
+/** How many of the 37 positions of a lone NaN (a vector body and a tail) the library's `iamax` answers
+ * with the NaN's own index, with or without an infinity elsewhere. The package follows netlib, which
+ * answers all 37; the libraries do not, so this is the one place they are not the oracle.
+ */
+private nan_positions_won[T: Oracle](lib: Lib, inc: i32, infinity: bool) -> usize
+    var xs: [74]T
+    var won: usize = 0
+    for k in 0..<37
+        for i in 0..<74
+            xs[i] = T.from_unit(f64(i % 5))
+        if infinity then xs[((k + 3) % 37) * usize(inc)] = T.from_unit(f64.infinity())
+        xs[k * usize(inc)] = T.from_unit(f64.nan())
+        if usize(T.o_iamax(lib, 37, as_mut_ptr(xs[..]), inc)) == k then won += 1
+    won
+
 // --- gemm ------------------------------------------------------------------------------------------
 
 /** Shapes (m, n, k): each dimension empty, one, under a tile, over a tile, and over a KC slice. */
@@ -494,6 +509,15 @@ oracle_iamax_ties()
     for lib in libs
         check_iamax_ties[f64](lib)
         check_iamax_ties[f32](lib)
+
+@test("iamax with a NaN: Accelerate never answers it, OpenBLAS only at element 0; neither is netlib's rule")
+oracle_iamax_nan()
+    for inc in [1, 2]
+        for inf in [false, true]
+            assert(nan_positions_won[f64](Lib.Accelerate, inc, inf) == 0, "Accelerate f64")
+            assert(nan_positions_won[f32](Lib.Accelerate, inc, inf) == 0, "Accelerate f32")
+            assert(nan_positions_won[f64](Lib.OpenBLAS, inc, inf) == 1, "OpenBLAS f64")
+            assert(nan_positions_won[f32](Lib.OpenBLAS, inc, inf) == 1, "OpenBLAS f32")
 
 @test("the two oracles are two libraries: OpenBLAS is loaded, and answers as Accelerate does")
 oracle_both_present()

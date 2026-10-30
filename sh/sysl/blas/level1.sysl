@@ -173,9 +173,12 @@ private const iamax_chunk_bytes: usize = 16384
 
 /** `iamax` of a non-empty contiguous `x`, read forwards.
  *
- * A chunk at a time: the lane-wise largest magnitude first, NaN lanes never chosen, and only when that
- * beats every chunk before it a second pass, from L1, for the first element that has it. A later
- * chunk that merely ties is not searched, so ties go to the earliest index.
+ * A chunk at a time: the lane-wise largest magnitude first (a NaN lane never wins it), beside lane
+ * sums of the elements, which are NaN where a NaN was added (and where infinities of opposite sign
+ * met, which the search for a real NaN then rules out). A chunk with a NaN ends the search: no earlier
+ * chunk had one, so its first NaN is the answer. Otherwise only when the chunk's largest beats every chunk before it is there a second
+ * pass, from L1, for the first element that has it; a later chunk that merely ties is not searched, so
+ * ties go to the earliest index.
  */
 private iamax_kernel[T: Real, const W: usize](x: []const T) -> usize
     val chunk = iamax_chunk_bytes / sizeof(T)
@@ -183,21 +186,30 @@ private iamax_kernel[T: Real, const W: usize](x: []const T) -> usize
     var best: usize = 0
     var c0: usize = 0
     @unchecked
-        if x[0].is_nan() then return 0
         while c0 < x.len
             val c1 = if x.len - c0 > chunk then c0 + chunk else x.len
             var lanes: <W>T = -T.one()
+            var sums: <W>T = T.zero()
             var i = c0
             while i + W <= c1
                 val v: <W>T = x.load(i)
                 val a = v.abs()
                 lanes = (a > lanes).select(a, lanes)
+                sums = sums + v
                 i += W
             var m = lanes.max()
+            var nan = (sums != sums).any()
             while i < c1
                 val a = x[i].abs()
                 if a > m then m = a
+                if a != a then nan = true
                 i += 1
+            if nan
+                // The sums are NaN for a NaN and also for opposite infinities, so look for a real one.
+                var j = c0
+                while j < c1
+                    if x[j].is_nan() then return j
+                    j += 1
             if m > top
                 top = m
                 var j = c0
@@ -366,8 +378,9 @@ swap[T: Real](x: StridedMut[T], y: StridedMut[T])
 
 /** The index, in BLAS order, of the first element of largest magnitude; `None` for an empty view.
  *
- * Ties go to the earliest index, and a NaN is never larger than anything, so it is chosen only when
- * it is element 0 and nothing after it compares larger.
+ * The rule is the reference BLAS's (`i?amax.f`, LAPACK 3.10 on): the first NaN wins over everything,
+ * infinities included; with no NaN, the first element of largest magnitude, so ties go to the earliest
+ * index. Both are counted in BLAS order, so a negative stride walks from the last element.
  */
 iamax[T: Real](x: Strided[T]) -> Option[usize]
     if x.len == 0 then return None
@@ -377,9 +390,11 @@ iamax[T: Real](x: Strided[T]) -> Option[usize]
     var ix = x.first()
     @unchecked
         var top = x.data[usize(ix)].abs()
+        if top.is_nan() then return Some(0)
         for i in 1..<x.len
             ix += x.inc
             val ax = x.data[usize(ix)].abs()
+            if ax.is_nan() then return Some(i)
             if ax > top
                 top = ax
                 best = i

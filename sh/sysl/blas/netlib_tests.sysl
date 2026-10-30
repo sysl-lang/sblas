@@ -24,9 +24,6 @@ module sh.sysl.blas
 //
 // Not ported: rotm, rotmg, axpby and dsdot/sdsdot, which this package does not provide.
 //
-// Where the package's documented behaviour differs from netlib, the test checks the package's own
-// definition and says so: the only such case is iamax with a NaN that is not element 0 (netlib's
-// i?amax returns the first NaN, this package's `iamax` never prefers a NaN; see its documentation).
 // Every strided case, negative strides included, agrees with netlib: for two-vector routines both
 // walk a negative stride backwards from the far end, and the one negative-stride one-vector call in
 // netlib's tables (nrm2, inside the scaling test) is a walk too.
@@ -576,23 +573,21 @@ private run_iamax[T: Real](lit: f64 -> T)
         sxr[2 * step] = T.infinity()
         sxr[4 * step] = T.infinity()
         assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, first infinity")
-        // NaNs. netlib's i?amax returns the first NaN wherever it is (4, 4, 1 and 7 below). This package's
-        // iamax never prefers a NaN: it answers the largest ordinary magnitude, or element 0 when that is
-        // the NaN, as its documentation says; the expected values here are that definition's.
+        // NaNs: netlib's i?amax returns the first NaN wherever it is.
         for i in 0..<8
             sxr[i * step] = lit(dvr[i])
         sxr[3 * step] = T.nan()
-        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, a NaN at element 4 is passed over (netlib: 4)")
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(4), "iamax, a NaN at element 4")
         sxr[5 * step] = T.nan()
-        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, two NaNs are passed over (netlib: 4)")
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(4), "iamax, two NaNs: the first")
         sxr[0] = T.nan()
-        assert(iamax(strided(sxr[..], 8, incx)) == one_based(1), "iamax, a NaN at element 1 is chosen")
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(1), "iamax, a NaN at element 1")
         for i in 0..<8
             sxr[i * step] = lit(dvr[i])
         sxr[2 * step] = T.infinity()
         sxr[4 * step] = T.infinity()
         sxr[6 * step] = T.nan()
-        assert(iamax(strided(sxr[..], 8, incx)) == one_based(3), "iamax, a NaN after an infinity is passed over (netlib: 7)")
+        assert(iamax(strided(sxr[..], 8, incx)) == one_based(7), "iamax, a NaN after an infinity")
     // N = 16 with a unique maximum away from either end.
     var xl: [16]T
     for i in 0..<16

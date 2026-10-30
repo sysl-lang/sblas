@@ -61,8 +61,10 @@ contiguous kernel and a scalar walk that follows arbitrary strides. `nrm2` keeps
 per lane, one per Blue band, at 64 bytes of lanes (128 spills); its band is chosen per lane by mask on
 `|v|`, a NaN falling in neither outer band and so in the middle sum, as the scalar rule puts it.
 `iamax` takes the kernel only at stride 1, where BLAS order is storage order: per 16 KB chunk, the
-lane-wise largest magnitude with NaN lanes never chosen, then, only when that beats every earlier
-chunk, a second pass from L1 for the first element holding it, so ties go to the earliest index.
+lane-wise largest magnitude with NaN lanes never chosen (a lane mask records the NaNs, which costs
+one compare and one OR per vector), then, only when that beats every earlier chunk, a second pass from
+L1 for the first element holding it, so ties go to the earliest index. A chunk holding a NaN ends the
+search at the first one, which is the first NaN overall.
 
 Level 2 builds on the Level 1 kernels. `gemv` on a matrix with contiguous columns is column axpys,
 four columns per pass so `y` is loaded and stored once per four; on contiguous rows (a transpose) it
@@ -238,10 +240,14 @@ package's, not one this library starts per call.
   tables gives a check that depends on no vendor. Level 1's tables are ported in `netlib_tests.sysl`
   (dot, axpy, rotg, rot, copy, swap, nrm2, asum, scal, iamax, at both widths, with netlib's
   `SFAC`-scaled comparison and the scaling stress test for `nrm2`); its header records the source URLs
-  and SHA-256s. They agree with the package everywhere except one documented choice: netlib's
-  `i?amax` returns the first NaN wherever it is, this package's `iamax` never prefers a NaN unless it
-  is element 0, so those cases are checked against the package's definition. Negative strides agree
+  and SHA-256s. They agree with the package everywhere, `iamax` with a NaN included: netlib's
+  `i?amax` returns the first NaN wherever it is, and so does the package. Negative strides agree
   too: netlib's two-vector routines and its `nrm2` test walk them backwards as the views do.
+- **`iamax` with a NaN is the one place the vendor libraries are not the oracle.** Accelerate never
+  answers a NaN (not even at element 0, nor when every other element is smaller); OpenBLAS answers one
+  only at element 0. Neither is netlib's rule, which the package follows, so
+  `oracle_iamax_nan` pins what each library does (as the Accelerate `gemv` M = 0 note does for that
+  case) and `netlib_tests.sysl` is the oracle.
 
 Every test runs under ASan as well (`SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`).
 
@@ -328,3 +334,6 @@ least 80% of its DGEMM), with Accelerate reported alongside.
     CBLAS's triangle-of-the-storage or a triangular view type. A view type (`Lower(a)`) would carry the
     triangle through `t()` itself; it waits for the routines that would share it (`trmm`, `symm`,
     `syrk`, `trsv`) to show whether that is worth a type per triangle.
+14. **`iamax` and NaN** — *decided*: the first NaN wins over everything, infinities included; with no
+    NaN, the first element of largest magnitude (reference LAPACK 3.10's `i?amax`). Accelerate and
+    OpenBLAS differ (see Oracles).

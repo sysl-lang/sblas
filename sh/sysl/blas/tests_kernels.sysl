@@ -8,10 +8,11 @@ module sh.sysl.blas
 
 private near[T: Real](got: T, want: T, ulps: T) -> bool = (got - want).abs() <= ulps * T.epsilon() * want.abs()
 
-/** `iamax` by its definition: the first index of the largest magnitude, a NaN never larger. */
+/** `iamax` by its definition: the first NaN if there is one, else the first index of the largest magnitude. */
 private first_largest[T: Real](xs: []const T) -> usize
     var best: usize = 0
-    for i in 1..<xs.len
+    for i in 0..<xs.len
+        if xs[i].is_nan() then return i
         if xs[i].abs() > xs[best].abs() then best = i
     best
 
@@ -205,7 +206,23 @@ iamax_infinities()
     xs[9] = f64.infinity()
     assert(iamax(view(xs[..])) == Some(9))
 
-@test("iamax: a NaN at element 0 is chosen whatever follows; a NaN anywhere else never is")
+@test("iamax: opposite infinities in one lane are not mistaken for a NaN, and a NaN after them still wins")
+iamax_opposite_infinities()
+    var fs: [4200]f32
+    fs[3] = f32.infinity()
+    fs[3 + 16] = -f32.infinity()
+    assert(iamax(view(fs[..])) == Some(3), "f32, +inf then -inf in a lane")
+    fs[4100] = f32.nan()
+    assert(iamax(view(fs[..])) == Some(4100), "f32, NaN in a later chunk")
+    fs[3 + 32] = f32.nan()
+    assert(iamax(view(fs[..])) == Some(35), "f32, NaN in the same lane after both")
+    var xs: [20]f64
+    xs[1] = -f64.infinity()
+    xs[9] = f64.infinity()
+    xs[17] = -f64.infinity()
+    assert(iamax(view(xs[..])) == Some(1), "f64, three infinities in one lane")
+
+@test("iamax returns the first NaN wherever it is, whatever else is present")
 iamax_nan_positions()
     var xs: [37]f64
     for i in 0..<37
@@ -213,22 +230,41 @@ iamax_nan_positions()
     xs[0] = f64.nan()
     xs[30] = f64.infinity()
     assert(iamax(view(xs[..])) == Some(0), "NaN first, infinity later")
-    for k in 1..<37
+    for k in 0..<usize(37)
         for i in 0..<37
             xs[i] = f64(i % 5)
         xs[k] = f64.nan()
-        assert(iamax(view(xs[..])) == Some(if k == 4 then 9 else 4), "NaN at k")
+        assert(iamax(view(xs[..])) == Some(k), "NaN at k")
+        assert(iamax(strided(xs[..], 37, -1)) == Some(36 - k), "NaN at k, stride -1")
+        xs[k] = -f64.infinity()
+        if k > 0 then xs[k - 1] = f64.infinity()
+        xs[(k + 7) % 37] = f64.nan()
+        assert(iamax(view(xs[..])) == Some((k + 7) % 37), "NaN among infinities")
+        xs[36 - k] = f64.nan()
+        val other_nan = (k + 7) % 37
+        assert(iamax(view(xs[..])) == Some(if other_nan < 36 - k then other_nan else 36 - k), "two NaNs: the first")
     for i in 1..<37
         xs[i] = f64.nan()
     xs[0] = -1
-    assert(iamax(view(xs[..])) == Some(0), "everything after element 0 a NaN")
+    assert(iamax(view(xs[..])) == Some(1), "everything after element 0 a NaN")
     xs[0] = f64.nan()
     assert(iamax(view(xs[..])) == Some(0), "every element a NaN")
     var fs: [33]f32
     fs[32] = f32.nan()
     fs[31] = 1
     fs[15] = f32.nan()
-    assert(iamax(view(fs[..])) == Some(31), "NaN in the tail and in a vector")
+    assert(iamax(view(fs[..])) == Some(15), "NaN in the tail and in a vector: the first")
+    fs[15] = 0
+    assert(iamax(view(fs[..])) == Some(32), "NaN in the tail only")
+    var other: [16]f64
+    for i in 0..<16
+        other[i] = 1
+    other[9] = f64.nan()
+    assert(iamax(strided(other[..], 5, 3)) == Some(3), "stride 3: the walk, NaN at 9")
+    assert(iamax(strided(other[..], 5, -3)) == Some(1), "stride -3: walk from the far end, NaN at 9")
+    assert(iamax(strided(other[..], 1, 1)) == Some(0), "one element")
+    other[0] = f64.nan()
+    assert(iamax(strided(other[..], 1, 1)) == Some(0), "one element, NaN")
 
 @test("iamax across chunks: ties to the earlier chunk, a larger value in a later one, NaN at a chunk's start")
 iamax_chunks()
@@ -243,7 +279,19 @@ iamax_chunks()
     assert(iamax(view(xs[..])) == Some(2047), "tie on a chunk boundary")
     xs[2048] = f64.nan()
     xs[2049] = 10
-    assert(iamax(view(xs[..])) == Some(2049), "NaN starting a chunk")
+    assert(iamax(view(xs[..])) == Some(2048), "NaN starting a chunk")
+    xs[2048] = -9
+    xs[4095] = f64.nan()
+    assert(iamax(view(xs[..])) == Some(4095), "NaN ending a chunk")
+    xs[4096] = f64.nan()
+    xs[4999] = f64.nan()
+    assert(iamax(view(xs[..])) == Some(4095), "NaNs in two chunks: the first")
+    xs[4095] = 0
+    xs[4096] = 0
+    assert(iamax(view(xs[..])) == Some(4999), "NaN in the last, short chunk")
+    xs[4999] = 0
+    xs[100] = f64.nan()
+    assert(iamax(view(xs[..])) == Some(100), "NaN in the first chunk, larger values after")
     for i in 0..<5000
         xs[i] = f64(i)
     assert(iamax(view(xs[..])) == Some(4999), "every chunk larger than the last")
