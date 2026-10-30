@@ -12,13 +12,16 @@ sysl build . -o bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench gemm
 caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench trsm
+caffeinate -dimsu env VECLIB_MAXIMUM_THREADS=1 ./bench l3sym
 caffeinate -dimsu ./bench gemm_par
 caffeinate -dimsu ./bench each
 ```
 
 With `gemm` it times gemm alone instead: square sizes 64 to 2048, GFLOPS. With `trsm` it times
 `B := A⁻¹ B` (left, lower, non-unit, B square) at the same sizes, GFLOPS counted as n³ per call; each
-call starts from a fresh copy of B, timed alike for all three. With `gemm_par` it times `gemm_par` on
+call starts from a fresh copy of B, timed alike for all three. With `l3sym` it times `syrk` (`C -= A Aᵀ`
+on the lower triangle, Cholesky's update) and `trmm` (`B := A B` with A lower on the left, `B := B A`
+with A upper on the right) the same way, n³ flops per call each. With `gemm_par` it times `gemm_par` on
 `sh.sysl.sblas.threads.Spawned` and on `sh.sysl.sblas_pool.PoolWorkers` over a standing pool, at 1,
 2, 4 and 6 workers, against OpenBLAS set to the same number of threads (`openblas_set_num_threads`),
 n = 128 to 2048. With `each` it times one `Workers.each` of empty jobs on both.
@@ -194,6 +197,67 @@ SME, out of scope as the target.
 - **Kept**: B packed by vectors — a row-major B a row at a time, a column-major B V rows at a time
   transposed in registers (`zip1`/`zip2`); a whole column-major tile written back by vectors; trsm's
   leaf held a column at a time in registers.
+
+## syrk, trmm, symv, syr2: Apple M5 Pro, sysl 0.8.3, OpenBLAS 0.3.34, 2026-10-30
+
+`./bench l3sym` (n³ flops per call) and the symmetric rows of `./bench` (2n² per call), with
+`VECLIB_MAXIMUM_THREADS=1`. The machine was heavily shared (load average 39–70) and sysl ran under
+`nice`, so the absolute figures are low and noisy; % OB, from the same interleaved trials, is the
+comparable column.
+
+| type | routine | n | sysl | Accelerate | OpenBLAS | % Acc | % OB |
+|---|---|---|---:|---:|---:|---:|---:|
+| f64 | syrk L N | 64 | 28.4 | 66.7 | 12.7 | 43 | 224 |
+| f64 | syrk L N | 256 | 36.9 | 124.2 | 32.2 | 30 | 115 |
+| f64 | syrk L N | 1024 | 49.9 | 223.6 | 48.6 | 22 | 103 |
+| f64 | syrk L N | 2048 | 47.9 | 200.0 | 47.0 | 24 | 102 |
+| f64 | trmm L L | 64 | 22.6 | 50.9 | 29.3 | 44 | 77 |
+| f64 | trmm L L | 256 | 43.4 | 207.9 | 46.2 | 21 | 94 |
+| f64 | trmm L L | 1024 | 49.2 | 276.5 | 49.2 | 18 | 100 |
+| f64 | trmm L L | 2048 | 51.4 | 331.1 | 52.2 | 16 | 98 |
+| f64 | trmm R U | 64 | 23.3 | 70.5 | 34.0 | 33 | 68 |
+| f64 | trmm R U | 256 | 38.7 | 166.9 | 43.8 | 23 | 88 |
+| f64 | trmm R U | 1024 | 37.0 | 156.7 | 42.6 | 24 | 87 |
+| f64 | trmm R U | 2048 | 38.5 | 189.8 | 43.7 | 20 | 88 |
+| f32 | syrk L N | 64 | 48.7 | 89.1 | 47.8 | 55 | 102 |
+| f32 | syrk L N | 256 | 81.0 | 344.2 | 75.0 | 24 | 108 |
+| f32 | syrk L N | 1024 | 94.3 | 509.5 | 91.1 | 19 | 104 |
+| f32 | syrk L N | 2048 | 100.4 | 692.2 | 95.4 | 14 | 105 |
+| f32 | trmm L L | 64 | 37.3 | 71.3 | 46.1 | 52 | 81 |
+| f32 | trmm L L | 256 | 77.6 | 376.9 | 83.7 | 21 | 93 |
+| f32 | trmm L L | 1024 | 100.1 | 859.2 | 97.0 | 12 | 103 |
+| f32 | trmm L L | 2048 | 103.5 | 1065.7 | 104.3 | 10 | 99 |
+| f32 | trmm R U | 64 | 37.6 | 100.7 | 56.2 | 37 | 67 |
+| f32 | trmm R U | 256 | 78.5 | 355.3 | 88.4 | 22 | 89 |
+| f32 | trmm R U | 1024 | 102.2 | 853.7 | 101.6 | 12 | 101 |
+| f32 | trmm R U | 2048 | 108.7 | 986.0 | 105.4 | 11 | 103 |
+| f64 | symv L | L1 48x48 | 25.1 | 7.6 | 39.5 | 331 | 63 |
+| f64 | symv U | L1 48x48 | 24.4 | 8.9 | 26.0 | 276 | 94 |
+| f64 | syr2 L | L1 48x48 | 21.2 | 37.4 | 9.0 | 57 | 235 |
+| f64 | symv L | L2 256x256 | 32.7 | 12.0 | 36.3 | 273 | 90 |
+| f64 | symv U | L2 256x256 | 35.7 | 24.3 | 35.1 | 147 | 102 |
+| f64 | syr2 L | L2 256x256 | 15.3 | 20.4 | 11.7 | 75 | 131 |
+| f64 | symv L | DRAM 2048x2048 | 29.4 | 15.5 | 30.3 | 190 | 97 |
+| f64 | symv U | DRAM 2048x2048 | 30.8 | 15.4 | 30.5 | 200 | 101 |
+| f64 | syr2 L | DRAM 2048x2048 | 21.2 | 8.9 | 16.2 | 237 | 131 |
+| f32 | symv L | L1 48x48 | 27.3 | 26.2 | 39.1 | 104 | 70 |
+| f32 | symv U | L1 48x48 | 25.9 | 27.8 | 32.3 | 93 | 80 |
+| f32 | syr2 L | L1 48x48 | 26.1 | 57.9 | 15.9 | 45 | 164 |
+| f32 | symv L | L2 256x256 | 55.9 | 52.2 | 73.8 | 107 | 76 |
+| f32 | symv U | L2 256x256 | 61.3 | 58.7 | 69.2 | 104 | 89 |
+| f32 | syr2 L | L2 256x256 | 36.3 | 47.1 | 24.3 | 77 | 149 |
+| f32 | symv L | DRAM 2048x2048 | 68.2 | 45.5 | 67.5 | 150 | 101 |
+| f32 | symv U | DRAM 2048x2048 | 62.7 | 47.7 | 59.5 | 131 | 105 |
+| f32 | syr2 L | DRAM 2048x2048 | 38.9 | 35.6 | 26.1 | 109 | 149 |
+
+- **syrk: 102–224% of OpenBLAS at f64, 102–111% at f32.** gemm's own loops, with the tiles above (or
+  below) the diagonal skipped.
+- **trmm: level with OpenBLAS from n = 512 (87–103%), 67–81% at n = 64.** The right side was 84–92%
+  when it ran as the left on the transposes, which hands gemm a row-major C; with its own recursion
+  an earlier, quieter round gave 96–106% from n = 512 at both widths. At n = 64 the 16-row diagonal
+  blocks are a quarter of the work.
+- **syr2: 131–235% of OpenBLAS. symv: level with OpenBLAS in main memory (97–105%), behind it in L1 and
+  L2 (63–102%)**, where OpenBLAS's lower-triangle kernel is fastest.
 
 ## gemm_par: Apple M5 Pro (6P + 12E), sysl 0.8.3, OpenBLAS 0.3.34, 2026-10-30
 
