@@ -110,7 +110,7 @@ syr2(Uplo.Lower, -1.0, v, w, s)                               // s -= v wᵀ + w
 
 ```
 dependencies {
-  sblas { git = "github.com/sysl-lang/sblas", version = "0.3.0" }
+  sblas { git = "github.com/sysl-lang/sblas", version = "0.4.0" }
 }
 ```
 
