@@ -43,11 +43,15 @@ private filled[T: Real](n: usize, g: *Gen) -> Buf[T]
  * element of C against the definition, and the padding between columns against what it was.
  */
 private check_def[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64)
+    check_def_layout[T](m, n, k, alpha, beta, seed, false)
+
+/** `check_def`, with A stored either column-major or as the transpose of a column-major `k` x `m`. */
+private check_def_layout[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed: u64, a_transposed: bool)
     var g = Gen(seed)
-    val lda = m + 1
+    val lda = if a_transposed then k + 1 else m + 1
     val ldb = k + 1
     val ldc = m + 1
-    val a = filled[T](lda * k, &g)
+    val a = filled[T](lda * (if a_transposed then m else k), &g)
     val b = filled[T](ldb * n, &g)
     val c = filled[T](ldc * n, &g)
     val c0: Buf[T] = buf_filled(c.len(), T.zero())
@@ -56,12 +60,14 @@ private check_def[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: T, seed
     val len = gemm_work_len[T](m, n, k)
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
-    gemm(alpha, matrix(a.view(), m, k, lda), matrix(b.view(), k, n, ldb), beta, matrix_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
+    val av = if a_transposed then matrix(a.view(), k, m, lda).t() else matrix(a.view(), m, k, lda)
+    gemm(alpha, av, matrix(b.view(), k, n, ldb), beta, matrix_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
     for j in 0..<n
         for i in 0..<m
             var s = T.zero()
             for p in 0..<k
-                s = s + a[i + p * lda] * b[p + j * ldb]
+                val aip = if a_transposed then a[p + i * lda] else a[i + p * lda]
+                s = s + aip * b[p + j * ldb]
             assert(c[i + j * ldc] == alpha * s + beta * c0[i + j * ldc], "gemm differs from its definition")
         assert(c[m + j * ldc] == c0[m + j * ldc], "gemm wrote between C's columns")
 
@@ -88,6 +94,27 @@ private sweep[T: Real](seed: u64)
     for n in around(ncols)
         check_def[T](mr + 3, n, 3, ratio[T](1, 2), ratio[T](1, 4), s)
         s += 1
+
+/** The micro-kernel takes two rank-1 updates per trip and the odd one alone, and packs a whole panel of
+ * a column-major A by vectors: every depth either side of that, at the first and a later KC slice, with
+ * A both column-major and transposed, full panels beside a fringe one.
+ */
+private depths[T: Real](seed: u64)
+    val (mr, nr, kc, _, _) = gemm_blocking[T]()
+    var s = seed
+    for k in [1, 2, 3, 4, 5, kc - 1, kc + 1, kc + 2, kc + 3, 2 * kc - 1]
+        for a_transposed in [false, true]
+            check_def_layout[T](2 * mr + 1, nr + 1, k, ratio[T](3, 2), ratio[T](-1, 2), s, a_transposed)
+            check_def_layout[T](mr, nr, k, T.one(), T.zero(), s + 1, a_transposed)
+            s += 2
+
+@test("gemm's micro-kernel and A packing are right at every depth around their steps, f64")
+gemm_depths_f64()
+    depths[f64](21)
+
+@test("gemm's micro-kernel and A packing are right at every depth around their steps, f32")
+gemm_depths_f32()
+    depths[f32](22)
 
 @test("gemm agrees with its definition across every blocking boundary, f64")
 gemm_sizes_f64()

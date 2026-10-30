@@ -85,9 +85,9 @@ gemm_work_len[T: Real](m: usize, n: usize, k: usize) -> GemmWorkLen
 
 /** Packs rows `i0 ..< i0 + mc` and columns `p0 ..< p0 + kc` of `a` into MR-row panels: panel `r`
  * starts at `r * MR * kc`, and holds column `p` of its rows at `p * MR`. A fringe panel's missing
- * rows are zeros.
+ * rows are zeros. A whole panel of a column-major `a` is copied a vector of `V` lanes at a time.
  */
-private pack_a[T: Real, const MR: usize](a: Matrix[T], i0: usize, mc: usize, p0: usize, kc: usize, out: []T)
+private pack_a[T: Real, const V: usize, const MR: usize](a: Matrix[T], i0: usize, mc: usize, p0: usize, kc: usize, out: []T)
     assert(round_up(mc, MR) * kc <= out.len, "gemm's A packing buffer is too short for the block")
     val rs = a.row_stride
     val cs = a.col_stride
@@ -97,13 +97,21 @@ private pack_a[T: Real, const MR: usize](a: Matrix[T], i0: usize, mc: usize, p0:
         while ir < mc
             val mr = min(mc - ir, MR)
             val base = (i0 + ir) * rs + p0 * cs
-            for p in 0..<kc
-                val col = base + p * cs
-                for i in 0..<mr
-                    out[at + i] = a.data[col + i * rs]
-                for i in mr..<MR
-                    out[at + i] = T.zero()
-                at += MR
+            if mr == MR && rs == 1
+                for p in 0..<kc
+                    val col = base + p * cs
+                    for v in 0..<MR / V
+                        val x: <V>T = a.data.load(col + v * V)
+                        out.store(at + v * V, x)
+                    at += MR
+            else
+                for p in 0..<kc
+                    val col = base + p * cs
+                    for i in 0..<mr
+                        out[at + i] = a.data[col + i * rs]
+                    for i in mr..<MR
+                        out[at + i] = T.zero()
+                    at += MR
             ir += MR
 
 /** Packs rows `p0 ..< p0 + kc` and columns `j0 ..< j0 + nc` of `b` into NR-column panels: panel `r`
@@ -131,6 +139,12 @@ private pack_b[T: Real, const NR: usize](b: Matrix[T], p0: usize, kc: usize, j0:
 
 // --- The micro-kernel ------------------------------------------------------------------------------
 
+/** How many rank-1 updates the micro-kernel's loop does per trip; the rest of `kc` runs one at a time.
+ * Two takes the loop's own count, add and branch off every other step (10% faster on an M5); three or
+ * four run out of registers, since LLVM then loads every step's A column ahead, and spill.
+ */
+private const k_unroll: usize = 2
+
 /** `tile := A~ * B~` for one MR x NR tile, MR being `MV` vectors of `V` lanes: `kc` rank-1 updates, each
  * a column of the A panel (`MV` loads) times each of NR elements of the B panel's row (a broadcast
  * and `MV` fused multiply-adds). The tile is written column-major, MR elements to a column.
@@ -139,7 +153,18 @@ private micro[T: Real, const V: usize, const MV: usize, const NR: usize](kc: usi
     var acc: [NR][MV]<V>T
     var a: [MV]<V>T
     @unchecked
-        for p in 0..<kc
+        for q in 0..<kc / k_unroll
+            for u in 0..<k_unroll
+                val p = q * k_unroll + u
+                val ao = p * V * MV
+                for v in 0..<MV
+                    a[v] = ap.load(ao + v * V)
+                val bo = p * NR
+                for j in 0..<NR
+                    val b = bp[bo + j]
+                    for v in 0..<MV
+                        acc[j][v] = a[v] * b + acc[j][v]
+        for p in kc / k_unroll * k_unroll..<kc
             val ao = p * V * MV
             for v in 0..<MV
                 a[v] = ap.load(ao + v * V)
@@ -201,7 +226,7 @@ private gemm_blocked[T: Real, const V: usize, const MV: usize, const NR: usize, 
             var ic: usize = 0
             while ic < m
                 val mcb = min(m - ic, MC)
-                pack_a[T, V * MV](a, ic, mcb, pc, kc, work.a)
+                pack_a[T, V, V * MV](a, ic, mcb, pc, kc, work.a)
                 var jr: usize = 0
                 while jr < ncb
                     val bp = work.b[jr * kc..<(jr + NR) * kc]
