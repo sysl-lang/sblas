@@ -70,7 +70,7 @@ Needs sysl 0.8.1.
 
 | directory | what |
 |---|---|
-| `sh/sysl/blas/` | the package — `blas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range, `rotg`'s signs, `iamax`'s ties, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary, `trsm` solved by hand and multiplied back across them) |
+| `sh/sysl/blas/` | the package — `blas.sysl` (element types, vector and matrix views), `level1.sysl`, `level2.sysl`, `level3.sysl` — and its tests against the definitions (`nrm2`'s range and band edges, `rotg`'s signs, `iamax`'s ties and NaNs across lanes and chunks, every length around the vector width, `gemv`'s and `ger`'s scalings and strides, `gemm` at every blocking boundary, `trsm` solved by hand and multiplied back across them) |
 | `sh/sysl/blas/heap/` | `gemm_alloc`, `trsm_alloc`: gemm and trsm with their packing buffers allocated per call (the main module is `@no_alloc`) |
 | `sh/sysl/blas/netlib_tests.sysl` | netlib's own Level 1 test tables (`dblat1.f`, `sblat1.f`) ported: the fixed vectors and expected results at every stride in them, with netlib's `SFAC`-scaled comparison |
 | `oracle/` | Accelerate and OpenBLAS declared behind one trait for both widths, and the tests comparing every routine with both on generated data at every stride sign, transpose and shape |
@@ -78,12 +78,15 @@ Needs sysl 0.8.1.
 
 ## Speed
 
-`dot`, `axpy`, `scal`, `copy`, `swap` and `rot` run a contiguous kernel over eight 128-bit registers
-per step. `asum`, `nrm2` and `iamax` are scalar until sysl 0.8.1 gives a vector a lane-wise `abs`;
-every vector load is still bounds-checked as a run, since sysl's `@unchecked` does not reach one.
+Every Level 1 routine runs a contiguous kernel over 128-bit registers when its views are contiguous:
+`asum`, `nrm2` and `iamax` take each lane's magnitude, `nrm2` choosing each lane's Blue band by mask.
 `gemv` runs four columns per pass of `y` (or four rows' dot products per pass of `x`, for a
 transpose), and `ger` column axpys; both take the vector a 16 KB panel at a time, so it stays in L1.
-Both are written up as sysl findings in [DESIGN.md](DESIGN.md#gaps-found-so-far).
+Each kernel checks its slices once and then loads and stores `@unchecked`, so no loop carries a
+bounds check. Single-threaded on an M5 Pro, every Level 1 and 2 routine is at OpenBLAS parity or
+better except `iamax` (76–106%), `copy` beyond L1 (75–85%), `ger` in f64 (91–94%), f32 `asum` in L2 (89%) and f32 `gemv` at 48 (83%);
+`nrm2` is 2.3x
+OpenBLAS at f64 and 4.3–4.7x at f32. Figures in [bench/README.md](bench/README.md).
 
 `sysl test .` runs the package and the oracle; under ASan,
 `SYSL_EXTRA_CFLAGS="-fsanitize=address -g" sysl test .`.

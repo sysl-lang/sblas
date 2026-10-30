@@ -57,7 +57,12 @@ order, or within a stated tolerance where it fuses differently.
 **Level 1 and Level 2 have no micro-kernel layer.** Their work is O(n) or O(n^2) on as much data, so
 they are memory-bound and a contiguous slice kernel over `<W>T` vectors (W = 128 bytes of lanes:
 eight 128-bit registers, so eight independent accumulators) is the whole design. Each routine has the
-contiguous kernel and a scalar walk that follows arbitrary strides.
+contiguous kernel and a scalar walk that follows arbitrary strides. `nrm2` keeps three accumulators
+per lane, one per Blue band, at 64 bytes of lanes (128 spills); its band is chosen per lane by mask on
+`|v|`, a NaN falling in neither outer band and so in the middle sum, as the scalar rule puts it.
+`iamax` takes the kernel only at stride 1, where BLAS order is storage order: per 16 KB chunk, the
+lane-wise largest magnitude with NaN lanes never chosen, then, only when that beats every earlier
+chunk, a second pass from L1 for the first element holding it, so ties go to the earliest index.
 
 Level 2 builds on the Level 1 kernels. `gemv` on a matrix with contiguous columns is column axpys,
 four columns per pass so `y` is loaded and stored once per four; on contiguous rows (a transpose) it
@@ -176,20 +181,22 @@ definitions named `cblas_dgemm` and so on, converting CBLAS's `(order, trans, n,
 into views. It would follow the reference's semantics exactly where they differ from the sysl API (a
 non-positive stride on a one-vector routine is a quick return there, a view here).
 
-## Where sysl 0.8.0 matters
+## Where sysl 0.8.1 matters
 
 The package needs 0.8.1 (`sysl = "0.8.1"`):
 
 - **Unchecked access in the walks.** A strided walk checks once, before it starts, that the view's
-  last element is inside its data (`walkable`), then reads and writes inside an `@unchecked` block.
-  Before, every element carried a compare and a branch the optimizer could not remove, since the
-  stride arithmetic is beyond what it proves. A view built by hand rather than by `strided` is caught
-  by the same check, and the tests trap one in each direction.
-- **Not in the kernels, because 0.8.0 cannot reach them.** A contiguous kernel's cost is its vector
-  `load`/`store`, each checked as a run (`i <= len - W`), and **`@unchecked` does not cover a vector
-  load** — it is a method, not a subscript — and there is no `load_unchecked`. So `dot` and `axpy` each
-  keep two compare-and-branch pairs per step (`axpy`'s load and store of `y` share one). A kernel's scalar tail needs nothing: the
-  optimizer proves its subscripts itself. This is sysl finding F1 below.
+  last element is inside its data (`walkable`), then reads and writes inside an `@unchecked` block,
+  since the stride arithmetic is beyond what the optimizer proves. A view built by hand rather than by
+  `strided` is caught by the same check, and the tests trap one in each direction.
+- **Unchecked vector loads and stores in the kernels.** `@unchecked` reaches a vector `load` and
+  `store` (0.8.1). Each kernel checks once that its slices have the same length (`runs`), after which
+  the loop condition `i + W <= len` keeps every load, store and tail subscript in bounds, and the whole
+  kernel runs `@unchecked`: no main loop of Level 1 or 2 carries a compare beside its own (counted in
+  the disassembly; `bench/README.md`). Tests hand a kernel slices of different lengths and see it trap
+  before it reads.
+- **Lane-wise `abs` and `mul_add`** (0.8.1) are what `asum`, `nrm2` and `iamax`'s kernels and the
+  fused accumulations are written with.
 - **Packing and the micro-kernel** index computed offsets inside the innermost loops, where a check is
   a compare and a branch per element; those loops are written for unchecked access from the start.
 - **Build modes.** The tests run in debug, which traps on integer overflow. The one trap the 0.7.10
@@ -255,34 +262,26 @@ least 80% of its DGEMM), with Accelerate reported alongside.
 
 ## Gaps found so far
 
-- **F1 is fixed in sysl 0.8.1 for Level 3.** `@unchecked` reaches a vector `load` and `store`, so
-  gemm's micro-kernel inner loop is 59 instructions per two steps at both widths (48 `fmla` by
-  element, 6 `ldp q`, the counter and the branch) with no check in it or in the tile's store, and B's
-  packing, the write-back and trsm's leaf move vectors unchecked.
-- **F1: a vector load or store cannot be unchecked.** `@unchecked` covers subscripts, and `x.load(i)`
-  / `y.store(i, v)` are methods, so inside the block they still compare `i` against `len - W` and
-  branch to `sysl_bounds_fail` (checked in the emitted IR of a three-line probe: `x[i]` loses its
-  check, `x.load(i)` keeps `icmp ule` + `br` to `bounds.bad`). There is no `load_unchecked` either.
-  The check is not removable by the optimizer, because the loop's `i + W <= len` is not known not to
-  wrap. In the `dot` kernel's loop that is 4 of 27 instructions (`cmp`/`b.hi` twice) beside 8 `ldp q`
-  and 8 `fmla.2d`; OpenBLAS's `daxpy` loop has none, and unrolls 32 elements with `prfm` 0x380 ahead.
-  The fix in sysl: `@unchecked` reaching a vector load and store (the reference's "every subscript
-  written inside it" read to include them), or `load_unchecked`/`store_unchecked`. Its cost is
-  measured by a C replica of the same kernel with and without the checks (`bench/README.md`). In
-  gemm's micro-kernel the A-panel and B-panel vector loads keep 40 of the f64 inner loop's 101
-  instructions (two steps) in checks, and 34 of f32's 95 (`micro` in `level3.sysl`); without them a
-  step is 30.5 instructions at both widths.
-- **F2: no lane-wise absolute value** (`type '<2>real' has no method 'abs'`; sysl 0.8.1 adds it).
-  `asum`, `nrm2` and `iamax` are scalar walks because of it: `asum` and `iamax` need `|v|`, and
-  `nrm2`'s band test is `|v| > t`. The longhands — `(v < 0).select(-v, v)`, or `(v > t) | (v < -t)` —
-  compile well (LLVM turns the second into `fabs.2d` + `fcmgt.2d`), which is exactly why they would
-  be copied; they are not written here. With it, all three take a contiguous kernel; a scalar
-  reduction cannot be vectorized by the back end, since it may not reassociate a float sum.
-- **Vector `mul_add`** (sysl 0.8.1). `a * b + c` already contracts to `fmla` at `optimization = "2"`
-  (`dot`, `axpy`, `rot` all use `fmla.2d`/`fmla.4s`), so Level 1 is not slowed; it is for the
-  micro-kernel, which must be able to ask for the fused form rather than hope for it. gemm's
-  micro-kernel and trsm's leaf now ask for it (`a.mul_add(b[l], acc)`); the instructions are the same
-  `fmla` by element as before, now promised rather than contracted.
+- **F1: a vector load or store could not be unchecked — fixed in sysl 0.8.1**, where `@unchecked`
+  reaches `load` and `store`. Every Level 1 and 2 kernel now runs unchecked after one length check;
+  `dot`'s loop is 23 instructions per 16 f64 with no compare beside its own. gemm's micro-kernel loop
+  is 59 instructions per two steps at both widths (48 `fmla` by element, 6 `ldp q`, the counter and
+  the branch) with no check in it or in the tile's store, and B's packing, the write-back and trsm's
+  leaf move vectors unchecked.
+- **F2: no lane-wise absolute value — fixed in sysl 0.8.1**, where `v.abs()` is one `fabs` per
+  register. `asum`, `nrm2` and `iamax` each take a contiguous kernel with it, and none spells `|v|` as
+  a `select`: `asum` is at OpenBLAS parity, `nrm2` 2.3–4.7x it, `iamax` 76–106% (`bench/README.md`).
+- **Vector `mul_add` — added in sysl 0.8.1.** The kernels' accumulations ask for the fused form
+  (`a.mul_add(b, acc)`) rather than relying on `a * b + c` contracting at `optimization = "2"`; so do
+  gemm's micro-kernel (`a[v].mul_add(b[l], acc)`, the same `fmla` by element as before) and trsm's
+  leaf.
+- **F5: a vector `load` as a method's argument takes no width from the receiver.** `acc =
+  a.mul_add(y.load(i), acc)` with `a: <16>f64` is refused — *'load' answers a vector, and how many
+  lanes it takes is the vector type's to say — nothing here says which* — though `a * y.load(i) + acc`
+  is accepted, since an operator's other operand gives the width (`reference/vectors.md`, "Where the
+  width comes from"). `mul_add`'s `b` and `c` are each the receiver's vector type or its lane type, so
+  the receiver decides it as an operand would. The kernels bind the load to a `val` of the vector type
+  first, as the diagnostic asks.
 - **An `impl` in a `@tests` file is refused for a builtin type even when the trait is the file's
   own.** The stated reason — a trait answering differently in tests and in the shipped program — does
   not arise for a trait that exists only in tests. This is why the oracle trait lives in the `oracle/`
@@ -295,9 +294,12 @@ least 80% of its DGEMM), with Accelerate reported alongside.
   […]f64 but the value is <N>f64*); sysl 0.8.1 makes it implicit at an assignment, an argument and a
   return, where the element type and the length agree.
 - **F4: prefetch is available from sysl 0.8.1** (`sysl.hint.prefetch(p, access, locality)`, one
-  `prfm`). gemm does not use it: prefetching both panels ahead in the k loop (A 512 or 1024 bytes, B
-  384 or 768) and the C tile before its write-back measured no faster at any size on an M5 Pro, whose
-  hardware prefetcher already follows the unit-stride panel walks.
+  `prfm`). Level 1 and 2 do not use it: measured 1 KB ahead in `dot` and `axpy` and 512 bytes ahead on
+  `gemv`'s four matrix streams, it was no faster than the hardware prefetcher on these sequential
+  streams outside DRAM-sized `gemv`, and slower in L1 and L2. gemm does not use it either:
+  prefetching both panels ahead in the k loop (A 512 or 1024 bytes, B 384 or 768) and the C tile
+  before its write-back measured no faster at any size on an M5 Pro, whose hardware prefetcher
+  already follows the unit-stride panel walks.
 - **A slice argument is retained and released around an inlined call.** Each tile's `micro` call
   takes and drops a reference count on `work.a` and `work.b` (`ldr`/`add`/`str` + `cbz` each way)
   even with the panels passed as offsets into the whole buffers; a borrowed parameter needs neither.
