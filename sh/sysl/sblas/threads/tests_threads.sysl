@@ -38,11 +38,11 @@ private check_threads[T: Real, W: Workers](workers: *W, m: usize, n: usize, k: u
     var g = Noise(seed * 2654435761 + 1)
     val a = noisy[T]((if a_t then m else k) * 3 + m * k + 3, &g)
     val b = noisy[T]((if b_t then k else n) * 3 + k * n + 3, &g)
-    val c = noisy[T]((m + 3) * n + 1, &g)
+    var c = noisy[T]((m + 3) * n + 1, &g)
     if beta == T.zero()
         for i in 0..<c.len()
             c[i] = T.nan()
-    val c1: Buf[T] = buf_filled(c.len(), T.zero())
+    var c1: Buf[T] = buf_filled(c.len(), T.zero())
     for i in 0..<c.len()
         c1[i] = c[i]
     val av = view_of(a.view(), m, k, a_t)

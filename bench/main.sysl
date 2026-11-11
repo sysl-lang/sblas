@@ -120,7 +120,7 @@ private bench_width[T: Oracle](name: string)
                 for who in 0..<3
                     val t0 = monotonic().us
                     for _ in 0..<reps
-                        once(op, who, black_box(x.view()), black_box(y.view()))
+                        once(op, who, black_box(x.view_mut()), black_box(y.view_mut()))
                     val dt = f64(monotonic().us - t0) * 1e-6
                     rates[who][t] = f64(op.streams() * sizeof(T) * n) * f64(reps) / dt * 1e-9
             val ours = median(rates[0][..])
@@ -149,12 +149,12 @@ private gemm_once[T: Oracle](who: usize, n: usize, a: []T, b: []T, c: []T, pa: [
 
 private bench_gemm[T: Oracle](name: string)
     for n in gemm_sizes
-        val a = fill[T](n * n)
-        val b = fill[T](n * n)
-        val c = fill[T](n * n)
+        var a = fill[T](n * n)
+        var b = fill[T](n * n)
+        var c = fill[T](n * n)
         val len = gemm_work_len[T](n, n, n)
-        val pa = fill[T](len.a)
-        val pb = fill[T](len.b)
+        var pa = fill[T](len.a)
+        var pb = fill[T](len.b)
         val flops = 2.0 * f64(n) * f64(n) * f64(n)
         val reps = int(gemm_work / flops) + 1
         var rates: [3][trials]f64
@@ -162,7 +162,7 @@ private bench_gemm[T: Oracle](name: string)
             for who in 0..<3
                 val t0 = monotonic().us
                 for _ in 0..<reps
-                    gemm_once(who, n, black_box(a.view()), black_box(b.view()), black_box(c.view()), pa.view(), pb.view())
+                    gemm_once(who, n, black_box(a.view_mut()), black_box(b.view_mut()), black_box(c.view_mut()), pa.view_mut(), pb.view_mut())
                 val dt = f64(monotonic().us - t0) * 1e-6
                 rates[who][t] = flops * f64(reps) / dt * 1e-9
         val ours = median(rates[0][..])
@@ -186,9 +186,9 @@ private time_par[T: Oracle, W: Workers](workers: *W, n: usize, reps: int, a: []T
 
 private bench_gemm_par[T: Oracle](name: string)
     for n in par_sizes
-        val a = fill[T](n * n)
-        val b = fill[T](n * n)
-        val c = fill[T](n * n)
+        var a = fill[T](n * n)
+        var b = fill[T](n * n)
+        var c = fill[T](n * n)
         val flops = 2.0 * f64(n) * f64(n) * f64(n)
         val reps = int(gemm_work / flops) + 1
         val one = T.one()
@@ -196,17 +196,17 @@ private bench_gemm_par[T: Oracle](name: string)
         for w in par_threads
             var pooled = PoolWorkers(Pool.new(max(w - 1, 1)), w)
             val len = gemm_par_work_len[T](n, n, n, w)
-            val pa = fill[T](len.a)
-            val pb = fill[T](len.b)
+            var pa = fill[T](len.a)
+            var pb = fill[T](len.b)
             ob_set_threads(i32(w))
             var rates = team(w, (tm) ->
                 var r: [3][trials]f64
                 for t in 0..<trials
-                    r[0][t] = time_par(tm, n, reps, a.view(), b.view(), c.view(), pa.view(), pb.view())
-                    r[1][t] = time_par(&pooled, n, reps, a.view(), b.view(), c.view(), pa.view(), pb.view())
+                    r[0][t] = time_par(tm, n, reps, a.view_mut(), b.view_mut(), c.view_mut(), pa.view_mut(), pb.view_mut())
+                    r[1][t] = time_par(&pooled, n, reps, a.view_mut(), b.view_mut(), c.view_mut(), pa.view_mut(), pb.view_mut())
                     val t1 = monotonic().us
                     for _ in 0..<reps
-                        T.o_gemm(Lib.OpenBLAS, false, false, nn, nn, nn, one, as_mut_ptr(black_box(a.view())), nn, as_mut_ptr(black_box(b.view())), nn, one, as_mut_ptr(black_box(c.view())), nn)
+                        T.o_gemm(Lib.OpenBLAS, false, false, nn, nn, nn, one, as_mut_ptr(black_box(a.view_mut())), nn, as_mut_ptr(black_box(b.view_mut())), nn, one, as_mut_ptr(black_box(c.view_mut())), nn)
                     r[2][t] = flops * f64(reps) / (f64(monotonic().us - t1) * 1e-6) * 1e-9
                 r)
             val tm = median(rates[0][..])
@@ -246,14 +246,14 @@ private trsm_once[T: Oracle](who: usize, n: usize, a: []T, b: []T, pa: []T, pb: 
 
 private bench_trsm[T: Oracle](name: string)
     for n in gemm_sizes
-        val a = fill[T](n * n)
+        var a = fill[T](n * n)
         for i in 0..<n
             a[i + i * n] = T.from_unit(f64(n))
         val b0 = fill[T](n * n)
-        val b = fill[T](n * n)
+        var b = fill[T](n * n)
         val len = trsm_work_len[T](Side.Left, n, n)
-        val pa = fill[T](len.a)
-        val pb = fill[T](len.b)
+        var pa = fill[T](len.a)
+        var pb = fill[T](len.b)
         // n² flops per right-hand side: n³ in all.
         val flops = f64(n) * f64(n) * f64(n)
         val reps = int(gemm_work / flops) + 1
@@ -267,7 +267,7 @@ private bench_trsm[T: Oracle](name: string)
                     // for all three alike.
                     for i in 0..<b.len()
                         b[i] = b0[i]
-                    trsm_once(who, n, black_box(a.view()), black_box(b.view()), pa.view(), pb.view())
+                    trsm_once(who, n, black_box(a.view_mut()), black_box(b.view_mut()), pa.view_mut(), pb.view_mut())
                 val dt = f64(monotonic().us - t0) * 1e-6
                 rates[who][t] = flops * f64(reps) / dt * 1e-9
         val ours = median(rates[0][..])
@@ -314,12 +314,12 @@ private once3[T: Oracle](op: Op3, who: usize, n: usize, a: []T, b: []T, pa: []T,
 private bench_l3sym[T: Oracle](name: string)
     for op in ops3
         for n in gemm_sizes
-            val a = fill[T](n * n)
+            var a = fill[T](n * n)
             val b0 = fill[T](n * n)
-            val b = fill[T](n * n)
+            var b = fill[T](n * n)
             val len = gemm_work_len[T](n, n, n)
-            val pa = fill[T](len.a)
-            val pb = fill[T](len.b)
+            var pa = fill[T](len.a)
+            var pb = fill[T](len.b)
             val flops = f64(n) * f64(n) * f64(n)
             val reps = int(gemm_work / flops) + 1
             var rates: [3][trials]f64
@@ -332,7 +332,7 @@ private bench_l3sym[T: Oracle](name: string)
                         // all three alike.
                         for i in 0..<b.len()
                             b[i] = b0[i]
-                        once3(op, who, n, black_box(a.view()), black_box(b.view()), pa.view(), pb.view())
+                        once3(op, who, n, black_box(a.view_mut()), black_box(b.view_mut()), pa.view_mut(), pb.view_mut())
                     val dt = f64(monotonic().us - t0) * 1e-6
                     rates[who][t] = flops * f64(reps) / dt * 1e-9
             val ours = median(rates[0][..])
@@ -402,12 +402,12 @@ private bench_level2[T: Oracle](name: string)
                 for who in 0..<3
                     val t0 = monotonic().us
                     for _ in 0..<reps
-                        once2(op, who, n, black_box(a.view()), black_box(x.view()), black_box(y.view()))
+                        once2(op, who, n, black_box(a.view_mut()), black_box(x.view_mut()), black_box(y.view_mut()))
                     val dt = f64(monotonic().us - t0) * 1e-6
                     rates[who][t] = 2 * f64(n * n) * f64(reps) / dt * 1e-9
                     // gemv accumulates into y, so it is reset, outside the clock, after each run.
                     for i in 0..<n
-                        y.view()[i] = T.from_unit(f64(i % 17) * 0.0625 - 0.5)
+                        y.view_mut()[i] = T.from_unit(f64(i % 17) * 0.0625 - 0.5)
             val ours = median(rates[0][..])
             val acc = median(rates[1][..])
             val ob = median(rates[2][..])

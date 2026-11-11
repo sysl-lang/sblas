@@ -500,8 +500,8 @@ private check_symv[T: Oracle](lib: Lib, seed: u64)
                     for k in 0..<ly
                         yb.view_mut()[k] = ya.view_mut()[k]
                     val x = strided(xs, n, incx)
-                    val y0 = strided(ya.view_mut()[0..<ly], n, incy)
                     for i in 0..<n
+                        val y0 = strided(ya.view()[0..<ly], n, incy)
                         var b = if be == 0 then T.zero() else (beta * y0.at(i)).abs()
                         for j in 0..<n
                             b = b + (alpha * sym(i, j) * x.at(j)).abs()
@@ -627,8 +627,8 @@ private check_gemv[T: Oracle](lib: Lib, seed: u64)
                         for k in 0..<ly
                             yb.view_mut()[k] = ya.view_mut()[k]
                         val x = strided(xs, xl, incx)
-                        val y0 = strided(ya.view_mut()[0..<ly], yl, incy)
                         for i in 0..<yl
+                            val y0 = strided(ya.view()[0..<ly], yl, incy)
                             var b = if be == 0 then T.zero() else (beta * y0.at(i)).abs()
                             for j in 0..<xl
                                 b = b + (alpha * a.at(i, j) * x.at(j)).abs()
@@ -672,8 +672,8 @@ private check_ger[T: Oracle](lib: Lib, seed: u64)
                             ger(alpha, x, y, a)
                         T.o_ger(lib, i32(m), i32(n), alpha, as_mut_ptr(xs), i32(incx), as_mut_ptr(ys), i32(incy), as_mut_ptr(ab.view_mut()[0..<la]), i32(lda))
                         for k in 0..<la
-                            val got = aa.view_mut()[k]
-                            val want = ab.view_mut()[k]
+                            val got = aa.view()[k]
+                            val want = ab.view()[k]
                             val i = k % lda
                             val j = k / lda
                             if i < m && j < n

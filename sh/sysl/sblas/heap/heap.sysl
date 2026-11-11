@@ -12,8 +12,8 @@ import sysl.buf.{Buf, buf_filled}
  */
 gemm_alloc[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T])
     val len = gemm_work_len[T](c.rows, c.cols, a.cols)
-    val pa: Buf[T] = buf_filled(len.a, T.zero())
-    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    var pa: Buf[T] = buf_filled(len.a, T.zero())
+    var pb: Buf[T] = buf_filled(len.b, T.zero())
     gemm(alpha, a, b, beta, c, GemmWork(pa.view_mut(), pb.view_mut()))
 
 /** `c := alpha * a * b + beta * c` on the caller's `workers`, as `sh.sysl.sblas.gemm_par`, with packing
@@ -21,8 +21,8 @@ gemm_alloc[T: Real](alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[
  */
 gemm_par_alloc[T: Real, W: Workers](workers: *W, alpha: T, a: Matrix[T], b: Matrix[T], beta: T, c: MatrixMut[T])
     val len = gemm_par_work_len[T](c.rows, c.cols, a.cols, workers.count())
-    val pa: Buf[T] = buf_filled(len.a, T.zero())
-    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    var pa: Buf[T] = buf_filled(len.a, T.zero())
+    var pb: Buf[T] = buf_filled(len.b, T.zero())
     gemm_par(workers, alpha, a, b, beta, c, GemmWork(pa.view_mut(), pb.view_mut()))
 
 /** The triangular solve of `sh.sysl.sblas.trsm`, with packing buffers allocated for the call and freed
@@ -30,8 +30,8 @@ gemm_par_alloc[T: Real, W: Workers](workers: *W, alpha: T, a: Matrix[T], b: Matr
  */
 trsm_alloc[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: MatrixMut[T])
     val len = trsm_work_len[T](side, b.rows, b.cols)
-    val pa: Buf[T] = buf_filled(len.a, T.zero())
-    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    var pa: Buf[T] = buf_filled(len.a, T.zero())
+    var pb: Buf[T] = buf_filled(len.b, T.zero())
     trsm(side, uplo, diag, alpha, a, b, GemmWork(pa.view_mut(), pb.view_mut()))
 
 /** The triangular multiply of `sh.sysl.sblas.trmm`, with packing buffers allocated for the call and
@@ -39,8 +39,8 @@ trsm_alloc[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], 
  */
 trmm_alloc[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], b: MatrixMut[T])
     val len = trmm_work_len[T](side, b.rows, b.cols)
-    val pa: Buf[T] = buf_filled(len.a, T.zero())
-    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    var pa: Buf[T] = buf_filled(len.a, T.zero())
+    var pb: Buf[T] = buf_filled(len.b, T.zero())
     trmm(side, uplo, diag, alpha, a, b, GemmWork(pa.view_mut(), pb.view_mut()))
 
 /** The symmetric rank-k update of `sh.sysl.sblas.syrk`, with packing buffers allocated for the call
@@ -48,6 +48,6 @@ trmm_alloc[T: Real](side: Side, uplo: Uplo, diag: Diag, alpha: T, a: Matrix[T], 
  */
 syrk_alloc[T: Real](uplo: Uplo, alpha: T, a: Matrix[T], beta: T, c: MatrixMut[T])
     val len = syrk_work_len[T](c.rows, a.cols)
-    val pa: Buf[T] = buf_filled(len.a, T.zero())
-    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    var pa: Buf[T] = buf_filled(len.a, T.zero())
+    var pb: Buf[T] = buf_filled(len.b, T.zero())
     syrk(uplo, alpha, a, beta, c, GemmWork(pa.view_mut(), pb.view_mut()))

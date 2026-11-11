@@ -47,13 +47,13 @@ private check_def_layout[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: 
     val ldc = m + 1
     val a = filled[T](lda * (if a_transposed then m else k), &g)
     val b = filled[T](ldb * (if b_transposed then k else n), &g)
-    val c = filled[T](ldc * n, &g)
+    var c = filled[T](ldc * n, &g)
     val c0: Buf[T] = buf_filled(c.len(), T.zero())
     for i in 0..<c.len()
         c0[i] = c[i]
     val len = gemm_work_len[T](m, n, k)
-    val pa: Buf[T] = buf_filled(len.a, T.zero())
-    val pb: Buf[T] = buf_filled(len.b, T.zero())
+    var pa: Buf[T] = buf_filled(len.a, T.zero())
+    var pb: Buf[T] = buf_filled(len.b, T.zero())
     val av = if a_transposed then matrix(a.view(), k, m, lda).t() else matrix(a.view(), m, k, lda)
     val bv = if b_transposed then matrix(b.view(), n, k, ldb).t() else matrix(b.view(), k, n, ldb)
     gemm(alpha, av, bv, beta, matrix_mut(c.view_mut(), m, n, ldc), GemmWork(pa.view_mut(), pb.view_mut()))
@@ -128,7 +128,7 @@ private check_pack_b[T: Real, const V: usize, const NR: usize](k: usize, n: usiz
     val nc = n - j0
     val panels = (nc + NR - 1) / NR
     val nan = T.zero() / T.zero()
-    val out: Buf[T] = buf_filled(panels * NR * kc + 3, nan)
+    var out: Buf[T] = buf_filled(panels * NR * kc + 3, nan)
     pack_b[T, V, NR](bm, p0, kc, j0, nc, out.view_mut())
     for r in 0..<panels
         for p in 0..<kc
@@ -193,7 +193,7 @@ private check_micro[T: Real, const V: usize, const MV: usize, const NR: usize](k
     val mr = V * MV
     val ap = filled[T](kc * mr, &g)
     val bp = filled[T](kc * NR, &g)
-    val tile: Buf[T] = buf_filled(mr * NR, T.zero() / T.zero())
+    var tile: Buf[T] = buf_filled(mr * NR, T.zero() / T.zero())
     micro[T, V, MV, NR](kc, ap.view(), bp.view(), tile.view_mut())
     for j in 0..<NR
         for i in 0..<mr
@@ -247,40 +247,40 @@ gemm_blocking_tiles()
 gemm_beta_zero_nan()
     val shapes: [3](usize, usize, usize) = [(3, 2, 4), (9, 7, 1), (17, 13, 3)]
     for (m, n, k) in shapes
-        val c: Buf[f64] = buf_filled(m * n, f64.nan())
+        var c: Buf[f64] = buf_filled(m * n, f64.nan())
         val a: Buf[f64] = buf_filled(m * k, 1.0)
         val b: Buf[f64] = buf_filled(k * n, 2.0)
-        gemm_into(1.0, a, b, 0.0, c, m, n, k)
+        gemm_into(1.0, a, b, 0.0, &c, m, n, k)
         for i in 0..<m * n
             assert(c[i] == f64(2 * k))
 
 @test("gemm with alpha zero reads neither A nor B, and scales C by beta")
 gemm_alpha_zero()
-    val c: Buf[f64] = buf_filled(6, 3.0)
+    var c: Buf[f64] = buf_filled(6, 3.0)
     val a: Buf[f64] = buf_filled(6, f64.nan())
     val b: Buf[f64] = buf_filled(4, f64.nan())
-    gemm_into(0.0, a, b, 0.5, c, 3, 2, 2)
+    gemm_into(0.0, a, b, 0.5, &c, 3, 2, 2)
     for i in 0..<6
         assert(c[i] == 1.5)
-    gemm_into(0.0, a, b, 0.0, c, 3, 2, 2)
+    gemm_into(0.0, a, b, 0.0, &c, 3, 2, 2)
     for i in 0..<6
         assert(c[i] == 0.0)
     c[0] = f64.nan()
-    gemm_into(0.0, a, b, 0.0, c, 3, 2, 2)
+    gemm_into(0.0, a, b, 0.0, &c, 3, 2, 2)
     assert(c[0] == 0.0, "beta zero clears a NaN even when alpha is zero")
 
 @test("gemm with alpha zero and beta one leaves a NaN in C alone")
 gemm_alpha_zero_beta_one()
-    val c: Buf[f64] = buf_filled(6, f64.nan())
+    var c: Buf[f64] = buf_filled(6, f64.nan())
     val a: Buf[f64] = buf_filled(6, 1.0)
     val b: Buf[f64] = buf_filled(4, 1.0)
-    gemm_into(0.0, a, b, 1.0, c, 3, 2, 2)
+    gemm_into(0.0, a, b, 1.0, &c, 3, 2, 2)
     assert(c[0].is_nan() && c[5].is_nan())
 
 @test("gemm with an empty shared dimension scales C by beta and reads no packing buffer")
 gemm_empty_k()
-    val c: Buf[f64] = buf_filled(6, 4.0)
-    val none: Buf[f64] = buf_filled(0, 0.0)
+    var c: Buf[f64] = buf_filled(6, 4.0)
+    var none: Buf[f64] = buf_filled(0, 0.0)
     gemm(2.0, matrix(none.view(), 3, 0, 3), matrix(none.view(), 0, 2, 1), 0.25, matrix_mut(c.view_mut(), 3, 2, 3), GemmWork(none.view_mut(), none.view_mut()))
     for i in 0..<6
         assert(c[i] == 1.0)
@@ -289,7 +289,7 @@ gemm_empty_k()
 
 @test("gemm with an empty m or n does nothing, whatever the other dimensions")
 gemm_empty_mn()
-    val none: Buf[f64] = buf_filled(0, 0.0)
+    var none: Buf[f64] = buf_filled(0, 0.0)
     val a: Buf[f64] = buf_filled(12, f64.nan())
     gemm(1.0, matrix(none.view(), 0, 4, 1), matrix(a.view(), 4, 3, 4), 0.0, matrix_mut(none.view_mut(), 0, 3, 1), GemmWork(none.view_mut(), none.view_mut()))
     gemm(1.0, matrix(a.view(), 3, 4, 3), matrix(none.view(), 4, 0, 4), 0.0, matrix_mut(none.view_mut(), 3, 0, 3), GemmWork(none.view_mut(), none.view_mut()))
@@ -354,8 +354,8 @@ gemm_hand_built_c_past_end()
     gemm(0.0, matrix(a[..], 2, 3, 2), matrix(a[..], 3, 2, 3), 0.0, MatrixMut(c[..], 2, 3, 1, 2), GemmWork(w[..], w[..]))
 
 /** gemm over contiguous column-major buffers, with buffers sized by gemm_work_len. */
-private gemm_into(alpha: f64, a: Buf[f64], b: Buf[f64], beta: f64, c: Buf[f64], m: usize, n: usize, k: usize)
+private gemm_into(alpha: f64, a: Buf[f64], b: Buf[f64], beta: f64, c: *Buf[f64], m: usize, n: usize, k: usize)
     val len = gemm_work_len[f64](m, n, k)
-    val pa: Buf[f64] = buf_filled(len.a, 0.0)
-    val pb: Buf[f64] = buf_filled(len.b, 0.0)
+    var pa: Buf[f64] = buf_filled(len.a, 0.0)
+    var pb: Buf[f64] = buf_filled(len.b, 0.0)
     gemm(alpha, matrix(a.view(), m, k, m), matrix(b.view(), k, n, k), beta, matrix_mut(c.view_mut(), m, n, m), GemmWork(pa.view_mut(), pb.view_mut()))
