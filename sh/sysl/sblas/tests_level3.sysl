@@ -56,7 +56,7 @@ private check_def_layout[T: Real](m: usize, n: usize, k: usize, alpha: T, beta: 
     val pb: Buf[T] = buf_filled(len.b, T.zero())
     val av = if a_transposed then matrix(a.view(), k, m, lda).t() else matrix(a.view(), m, k, lda)
     val bv = if b_transposed then matrix(b.view(), n, k, ldb).t() else matrix(b.view(), k, n, ldb)
-    gemm(alpha, av, bv, beta, matrix_mut(c.view(), m, n, ldc), GemmWork(pa.view(), pb.view()))
+    gemm(alpha, av, bv, beta, matrix_mut(c.view_mut(), m, n, ldc), GemmWork(pa.view_mut(), pb.view_mut()))
     for j in 0..<n
         for i in 0..<m
             var s = T.zero()
@@ -129,7 +129,7 @@ private check_pack_b[T: Real, const V: usize, const NR: usize](k: usize, n: usiz
     val panels = (nc + NR - 1) / NR
     val nan = T.zero() / T.zero()
     val out: Buf[T] = buf_filled(panels * NR * kc + 3, nan)
-    pack_b[T, V, NR](bm, p0, kc, j0, nc, out.view())
+    pack_b[T, V, NR](bm, p0, kc, j0, nc, out.view_mut())
     for r in 0..<panels
         for p in 0..<kc
             for j in 0..<NR
@@ -194,7 +194,7 @@ private check_micro[T: Real, const V: usize, const MV: usize, const NR: usize](k
     val ap = filled[T](kc * mr, &g)
     val bp = filled[T](kc * NR, &g)
     val tile: Buf[T] = buf_filled(mr * NR, T.zero() / T.zero())
-    micro[T, V, MV, NR](kc, ap.view(), bp.view(), tile.view())
+    micro[T, V, MV, NR](kc, ap.view(), bp.view(), tile.view_mut())
     for j in 0..<NR
         for i in 0..<mr
             var s = T.zero()
@@ -281,7 +281,7 @@ gemm_alpha_zero_beta_one()
 gemm_empty_k()
     val c: Buf[f64] = buf_filled(6, 4.0)
     val none: Buf[f64] = buf_filled(0, 0.0)
-    gemm(2.0, matrix(none.view(), 3, 0, 3), matrix(none.view(), 0, 2, 1), 0.25, matrix_mut(c.view(), 3, 2, 3), GemmWork(none.view(), none.view()))
+    gemm(2.0, matrix(none.view(), 3, 0, 3), matrix(none.view(), 0, 2, 1), 0.25, matrix_mut(c.view_mut(), 3, 2, 3), GemmWork(none.view_mut(), none.view_mut()))
     for i in 0..<6
         assert(c[i] == 1.0)
     val len = gemm_work_len[f64](3, 2, 0)
@@ -291,8 +291,8 @@ gemm_empty_k()
 gemm_empty_mn()
     val none: Buf[f64] = buf_filled(0, 0.0)
     val a: Buf[f64] = buf_filled(12, f64.nan())
-    gemm(1.0, matrix(none.view(), 0, 4, 1), matrix(a.view(), 4, 3, 4), 0.0, matrix_mut(none.view(), 0, 3, 1), GemmWork(none.view(), none.view()))
-    gemm(1.0, matrix(a.view(), 3, 4, 3), matrix(none.view(), 4, 0, 4), 0.0, matrix_mut(none.view(), 3, 0, 3), GemmWork(none.view(), none.view()))
+    gemm(1.0, matrix(none.view(), 0, 4, 1), matrix(a.view(), 4, 3, 4), 0.0, matrix_mut(none.view_mut(), 0, 3, 1), GemmWork(none.view_mut(), none.view_mut()))
+    gemm(1.0, matrix(a.view(), 3, 4, 3), matrix(none.view(), 4, 0, 4), 0.0, matrix_mut(none.view_mut(), 3, 0, 3), GemmWork(none.view_mut(), none.view_mut()))
     assert(gemm_work_len[f32](0, 5, 5).a == 0 && gemm_work_len[f32](5, 0, 5).b == 0)
 
 @test("a transpose is the same storage with the strides swapped")
@@ -358,4 +358,4 @@ private gemm_into(alpha: f64, a: Buf[f64], b: Buf[f64], beta: f64, c: Buf[f64], 
     val len = gemm_work_len[f64](m, n, k)
     val pa: Buf[f64] = buf_filled(len.a, 0.0)
     val pb: Buf[f64] = buf_filled(len.b, 0.0)
-    gemm(alpha, matrix(a.view(), m, k, m), matrix(b.view(), k, n, k), beta, matrix_mut(c.view(), m, n, m), GemmWork(pa.view(), pb.view()))
+    gemm(alpha, matrix(a.view(), m, k, m), matrix(b.view(), k, n, k), beta, matrix_mut(c.view_mut(), m, n, m), GemmWork(pa.view_mut(), pb.view_mut()))

@@ -56,7 +56,7 @@ private check_solve[T: Real](left: bool, lower: bool, unit: bool, a_t: bool, b_t
     val (sr, sc) = if b_t then (cols, rows) else (rows, cols)
     val ldb = sr + 2
     val bs: Buf[T] = buf_filled(ldb * sc, T(7))
-    val bm = if b_t then matrix_mut(bs.view(), sr, sc, ldb).t() else matrix_mut(bs.view(), sr, sc, ldb)
+    val bm = if b_t then matrix_mut(bs.view_mut(), sr, sc, ldb).t() else matrix_mut(bs.view_mut(), sr, sc, ldb)
     for j in 0..<cols
         for i in 0..<rows
             var s = T.zero()
@@ -67,7 +67,7 @@ private check_solve[T: Real](left: bool, lower: bool, unit: bool, a_t: bool, b_t
     val len = trsm_work_len[T](side, rows, cols)
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
-    trsm(side, uplo, diag, T(2), a, bm, GemmWork(pa.view(), pb.view()))
+    trsm(side, uplo, diag, T(2), a, bm, GemmWork(pa.view_mut(), pb.view_mut()))
     val tol = T(64 * (int(k) + 4)) * T.epsilon() * T(8)
     for j in 0..<cols
         for i in 0..<rows
@@ -138,7 +138,7 @@ private check_singular[T: Real](lower: bool, k: usize, z: usize, b_t: bool)
             store[p + z * k] = T.one()
     val other: usize = 3
     val bs: Buf[T] = buf_filled(k * other, T.one())
-    val bm = if b_t then matrix_mut(bs.view(), other, k, other).t() else matrix_mut(bs.view(), k, other, k)
+    val bm = if b_t then matrix_mut(bs.view_mut(), other, k, other).t() else matrix_mut(bs.view_mut(), k, other, k)
     var w: [1]T
     trsm(Side.Left, if lower then Uplo.Lower else Uplo.Upper, Diag.NonUnit, T.one(), matrix(store.view(), k, k, k), bm, GemmWork(w[..], w[..]))
     for j in 0..<other
@@ -237,7 +237,7 @@ trsm_alpha_zero_large()
     val len = trsm_work_len[f64](Side.Left, k, 2)
     val pa: Buf[f64] = buf_filled(len.a, 0.0)
     val pb: Buf[f64] = buf_filled(len.b, 0.0)
-    trsm(Side.Left, Uplo.Upper, Diag.Unit, 0.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, 2, k), GemmWork(pa.view(), pb.view()))
+    trsm(Side.Left, Uplo.Upper, Diag.Unit, 0.0, matrix(a.view(), k, k, k), matrix_mut(b.view_mut(), k, 2, k), GemmWork(pa.view_mut(), pb.view_mut()))
     for i in 0..<b.len()
         assert(b[i] == 0)
 
@@ -293,7 +293,7 @@ trsm_short_work()
     val k: usize = 40
     val a: Buf[f64] = buf_filled(k * k, 1.0)
     val b: Buf[f64] = buf_filled(k, 1.0)
-    trsm(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, 1, k), GemmWork(w[..], w[..]))
+    trsm(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(a.view(), k, k, k), matrix_mut(b.view_mut(), k, 1, k), GemmWork(w[..], w[..]))
 
 @test("a hand-built A past its data traps before trsm reads it", should_trap)
 trsm_hand_built_past_end()

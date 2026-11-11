@@ -40,14 +40,14 @@ private same[T: Real](a: T, b: T) -> bool = a == b || (a.is_nan() && b.is_nan())
 
 private inside(lower: bool, i: usize, j: usize) -> bool = if lower then i >= j else i <= j
 
-private copy_of[T: Real](xs: []T) -> Buf[T]
+private copy_of[T: Real](xs: []const T) -> Buf[T]
     val b: Buf[T] = buf_filled(xs.len, T.zero())
     for i in 0..<xs.len
         b[i] = xs[i]
     b
 
 /** Every element of `got` that `live` does not mark is as it was in `before`. */
-private untouched[T: Real](got: []T, before: []T, live: []bool, what: string)
+private untouched[T: Real](got: []const T, before: []const T, live: []const bool, what: string)
     for i in 0..<got.len
         if !live[i]
             assert(same(got[i], before[i]), what)
@@ -61,7 +61,7 @@ private check_syrk[T: Real](lower: bool, la: usize, lc: usize, n: usize, k: usiz
     var g = Draw(seed)
     val (ars, acs, alen) = laid(la, n, k)
     val astore: Buf[T] = buf_filled(alen, T.nan())
-    val am = MatrixMut(astore.view(), n, k, ars, acs)
+    val am = MatrixMut(astore.view_mut(), n, k, ars, acs)
     for j in 0..<k
         for i in 0..<n
             am.set(i, j, T(g.next()))
@@ -69,7 +69,7 @@ private check_syrk[T: Real](lower: bool, la: usize, lc: usize, n: usize, k: usiz
     val (crs, ccs, clen) = laid(lc, n, n)
     val cstore: Buf[T] = buf_filled(clen, T(pad))
     val live: Buf[bool] = buf_filled(clen, false)
-    val c = MatrixMut(cstore.view(), n, n, crs, ccs)
+    val c = MatrixMut(cstore.view_mut(), n, n, crs, ccs)
     for j in 0..<n
         for i in 0..<n
             if !inside(lower, i, j)
@@ -89,7 +89,7 @@ private check_syrk[T: Real](lower: bool, la: usize, lc: usize, n: usize, k: usiz
     val len = syrk_work_len[T](n, k)
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
-    syrk(if lower then Uplo.Lower else Uplo.Upper, alpha, a, beta, c, GemmWork(pa.view(), pb.view()))
+    syrk(if lower then Uplo.Lower else Uplo.Upper, alpha, a, beta, c, GemmWork(pa.view_mut(), pb.view_mut()))
     for j in 0..<n
         for i in 0..<n
             if inside(lower, i, j)
@@ -163,7 +163,7 @@ syrk_alpha_zero_reads_nothing()
     val len = syrk_work_len[f64](3, 40)
     val pa: Buf[f64] = buf_filled(len.a, 0.0)
     val pb: Buf[f64] = buf_filled(len.b, 0.0)
-    syrk(Uplo.Lower, 0.0, matrix(a.view(), 3, 40, 3), 2.0, matrix_mut(c[..], 3, 3, 3), GemmWork(pa.view(), pb.view()))
+    syrk(Uplo.Lower, 0.0, matrix(a.view(), 3, 40, 3), 2.0, matrix_mut(c[..], 3, 3, 3), GemmWork(pa.view_mut(), pb.view_mut()))
     assert(c[0] == 2 && c[1] == 4 && c[2] == 6 && c[4] == 10 && c[5] == 12 && c[8] == 18)
     assert(c[3].is_nan() && c[6].is_nan() && c[7].is_nan(), "syrk touched the upper triangle")
 
@@ -211,7 +211,7 @@ syrk_a_past_end()
     val len = syrk_work_len[f64](2, 2)
     val pa: Buf[f64] = buf_filled(len.a, 0.0)
     val pb: Buf[f64] = buf_filled(len.b, 0.0)
-    syrk(Uplo.Lower, 1.0, Matrix(a[..], 2, 2, 1, 2), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa.view(), pb.view()))
+    syrk(Uplo.Lower, 1.0, Matrix(a[..], 2, 2, 1, 2), 0.0, matrix_mut(c[..], 2, 2, 2), GemmWork(pa.view_mut(), pb.view_mut()))
 
 @test("a hand-built C past its data traps before syrk writes it, even with alpha zero", should_trap)
 syrk_c_past_end()
@@ -230,7 +230,7 @@ private check_trmm[T: Real](left: bool, lower: bool, unit: bool, la: usize, lb: 
     var g = Draw(seed)
     val (ars, acs, alen) = laid(la, k, k)
     val astore: Buf[T] = buf_filled(alen, T.nan())
-    val am = MatrixMut(astore.view(), k, k, ars, acs)
+    val am = MatrixMut(astore.view_mut(), k, k, ars, acs)
     for j in 0..<k
         for i in 0..<k
             if inside(lower, i, j) && (i != j || !unit)
@@ -241,7 +241,7 @@ private check_trmm[T: Real](left: bool, lower: bool, unit: bool, la: usize, lb: 
     val (brs, bcs, blen) = laid(lb, rows, cols)
     val bstore: Buf[T] = buf_filled(blen, T(pad))
     val live: Buf[bool] = buf_filled(blen, false)
-    val b = MatrixMut(bstore.view(), rows, cols, brs, bcs)
+    val b = MatrixMut(bstore.view_mut(), rows, cols, brs, bcs)
     for j in 0..<cols
         for i in 0..<rows
             b.set(i, j, T(g.next()))
@@ -258,7 +258,7 @@ private check_trmm[T: Real](left: bool, lower: bool, unit: bool, la: usize, lb: 
     val len = trmm_work_len[T](side, rows, cols)
     val pa: Buf[T] = buf_filled(len.a, T.zero())
     val pb: Buf[T] = buf_filled(len.b, T.zero())
-    trmm(side, if lower then Uplo.Lower else Uplo.Upper, if unit then Diag.Unit else Diag.NonUnit, alpha, a, b, GemmWork(pa.view(), pb.view()))
+    trmm(side, if lower then Uplo.Lower else Uplo.Upper, if unit then Diag.Unit else Diag.NonUnit, alpha, a, b, GemmWork(pa.view_mut(), pb.view_mut()))
     for j in 0..<cols
         for i in 0..<rows
             assert(b.at(i, j) == want[i + j * rows], "trmm differs from its definition")
@@ -316,7 +316,7 @@ private check_infinity[T: Real](lower: bool, k: usize, z: usize, lb: usize)
                 am[i + j * k] = if i == j || j == z then T.one() else T.zero()
     val (brs, bcs, blen) = laid(lb, k, 3)
     val bstore: Buf[T] = buf_filled(blen, T(pad))
-    val b = MatrixMut(bstore.view(), k, 3, brs, bcs)
+    val b = MatrixMut(bstore.view_mut(), k, 3, brs, bcs)
     for j in 0..<3
         for i in 0..<k
             b.set(i, j, if i == z then T.infinity() else T.one())
@@ -357,7 +357,7 @@ trmm_alpha_zero()
             val len = trmm_work_len[f64](side, k, k)
             val pa: Buf[f64] = buf_filled(len.a, 0.0)
             val pb: Buf[f64] = buf_filled(len.b, 0.0)
-            trmm(side, Uplo.Upper, Diag.NonUnit, 0.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, k, k + 1), GemmWork(pa.view(), pb.view()))
+            trmm(side, Uplo.Upper, Diag.NonUnit, 0.0, matrix(a.view(), k, k, k), matrix_mut(b.view_mut(), k, k, k + 1), GemmWork(pa.view_mut(), pb.view_mut()))
             for j in 0..<k
                 for i in 0..<k
                     assert(b[i + j * (k + 1)] == 0, "alpha zero left something in B")
@@ -412,7 +412,7 @@ trmm_short_work()
     val k: usize = 40
     val a: Buf[f64] = buf_filled(k * k, 1.0)
     val b: Buf[f64] = buf_filled(k, 1.0)
-    trmm(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(a.view(), k, k, k), matrix_mut(b.view(), k, 1, k), GemmWork(w[..], w[..]))
+    trmm(Side.Left, Uplo.Lower, Diag.Unit, 1.0, matrix(a.view(), k, k, k), matrix_mut(b.view_mut(), k, 1, k), GemmWork(w[..], w[..]))
 
 @test("a hand-built A past its data traps before trmm reads it", should_trap)
 trmm_a_past_end()
@@ -464,7 +464,7 @@ private check_symv[T: Real](lower: bool, la: usize, n: usize, incx: int, incy: i
             xs[i] = T(g.next())
     val ys: Buf[T] = buf_filled(extent(n, incy), T(pad))
     val live: Buf[bool] = buf_filled(ys.len(), false)
-    val y = strided_mut(ys.view(), n, incy)
+    val y = strided_mut(ys.view_mut(), n, incy)
     for i in 0..<n
         y.set(i, if beta == T.zero() then T.nan() else T(g.next()))
     for i in 0..<ys.len()
@@ -512,7 +512,7 @@ symv_def_f32()
 private check_syr2[T: Real](lower: bool, la: usize, n: usize, incx: int, incy: int, alpha: T, seed: u64)
     var g = Draw(seed)
     val (astore, rs, cs) = sym_store[T](lower, la, n, &g)
-    val a = MatrixMut(astore.view(), n, n, rs, cs)
+    val a = MatrixMut(astore.view_mut(), n, n, rs, cs)
     val live: Buf[bool] = buf_filled(astore.len(), false)
     if alpha != T.zero()
         for j in 0..<n

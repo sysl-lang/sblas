@@ -47,8 +47,8 @@ private check_threads[T: Real, W: Workers](workers: *W, m: usize, n: usize, k: u
         c1[i] = c[i]
     val av = view_of(a.view(), m, k, a_t)
     val bv = view_of(b.view(), k, n, b_t)
-    gemm_alloc(alpha, av, bv, beta, matrix_mut(c.view(), m, n, m + 3))
-    gemm_par_alloc(workers, alpha, av, bv, beta, matrix_mut(c1.view(), m, n, m + 3))
+    gemm_alloc(alpha, av, bv, beta, matrix_mut(c.view_mut(), m, n, m + 3))
+    gemm_par_alloc(workers, alpha, av, bv, beta, matrix_mut(c1.view_mut(), m, n, m + 3))
     for i in 0..<c.len()
         assert(c[i] == c1[i] || (c[i].is_nan() && c1[i].is_nan()), "gemm_par on threads differs from gemm")
     if beta == T.zero()
