@@ -453,7 +453,7 @@ syrk[T: Real](uplo: Uplo, alpha: T, a: Matrix[T], beta: T, c: MatrixMut[T], work
 
 /** The workers gemm_par runs its jobs on: the caller's pool, since this module starts no thread.
  *
- * An implementation marks its `each` `@scoped(job)` — the promise that every job has finished when
+ * An implementation marks its `each` `@bounded(job)` — the promise that every job has finished when
  * `each` returns — which is what lets gemm's jobs borrow the matrices rather than share them.
  * `sh.sysl.sblas.threads` has two over `sysl.threads`: a `Team` of standing threads, and `Spawned`.
  */

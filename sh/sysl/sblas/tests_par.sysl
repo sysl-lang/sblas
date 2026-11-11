@@ -16,7 +16,7 @@ private struct Backwards
 impl Workers for Backwards
     count(*self) -> usize = self.n
 
-    @scoped(job)
+    @bounded(job)
     each(*self, job: &sync Fn(usize) -> unit)
         var w = self.n
         while w > 0

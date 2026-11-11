@@ -34,6 +34,7 @@ private struct Crew
 /** Runs `body` with a team of `n` workers, and answers what `body` answered once every thread the team
  * started has finished. An `n` of one starts no thread; an `n` of zero traps.
  */
+@bounded(body)
 team[R](n: usize, body: *Team -> R) -> R
     assert(n >= 1, "a team needs at least one worker")
     val crew: &sync Crew = Crew(barrier(n), barrier(n), Mutex.new(None))
@@ -68,7 +69,7 @@ impl Workers for Team
     /** Hands `job` to the team's threads, runs `job(0)` here meanwhile, and returns once every one of
      * them has finished it.
      */
-    @scoped(job)
+    @bounded(job)
     each(*self, job: &sync Fn(usize) -> unit)
         if self.n == 1
             job(0)
@@ -89,7 +90,7 @@ impl Workers for Spawned
     /** Runs `job(0)` here and every other job on a thread of its own, and returns once all are done.
      * Where the system will not start a thread the program stops with a message.
      */
-    @scoped(job)
+    @bounded(job)
     each(*self, job: &sync Fn(usize) -> unit)
         scope((s) ->
             for w in 1..<self.n

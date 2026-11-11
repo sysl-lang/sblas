@@ -26,7 +26,7 @@ impl Workers for PoolWorkers
     /** Hands every job past the first to the pool as a task of one scope, runs `job(0)` here
      * meanwhile, and returns once all have run. One job runs here alone, with no task at all.
      */
-    @scoped(job)
+    @bounded(job)
     each(*self, job: &sync Fn(usize) -> unit)
         val n = self.n
         if n <= 1

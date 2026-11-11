@@ -5,5 +5,5 @@ package { name = "sblas-pool", version = "0.0.1", sysl = "0.10.0" }
 optimization = "2"
 dependencies {
     sblas { workspace = true }
-    pool { git = "github.com/sysl-lang/pool", version = "0.1.4" }
+    pool { git = "github.com/sysl-lang/pool", version = "0.1.5" }
 }
